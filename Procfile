@@ -1,1 +1,1 @@
-web: ./toolforge-start.sh
+web: bash toolforge-start.sh
