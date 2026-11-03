@@ -1,0 +1,9 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{% if job.status in ['pending','running'] %}<meta http-equiv="refresh" content="3">{% endif %}
+<title>{{job.case_number}} - KoCaseImport</title><style>body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 16px;line-height:1.55}pre{white-space:pre-wrap;background:#f6f6f6;padding:1rem;overflow:auto}.ok{color:#176b2c}.bad{color:#a00}</style></head><body>
+<p><a href="/">← 목록</a></p><h1>{{job.case_number}}</h1>
+<p>상태: <strong class="{% if job.status=='done' %}ok{% elif job.status=='failed' %}bad{% endif %}">{{job.status}}</strong> / 단계: {{job.step}}</p>
+{% if job.error %}<h2>오류</h2><pre class="bad">{{job.error}}</pre>{% endif %}
+{% if job.payload %}<h2>결과</h2><pre>{{job.payload | tojson(indent=2)}}</pre>{% endif %}
+<h2>로그</h2><pre>{{job.log}}</pre>
+</body></html>

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KoCaseImport</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 16px;line-height:1.55}label{display:block;margin:.8rem 0 .25rem}input[type=text]{width:100%;box-sizing:border-box;padding:.6rem}.row{display:flex;gap:1rem;align-items:center;margin:1rem 0}button{padding:.65rem 1rem}.error{background:#fee;border:1px solid #d33;padding:.8rem}table{width:100%;border-collapse:collapse;margin-top:2rem}th,td{padding:.5rem;border-bottom:1px solid #ddd;text-align:left}.muted{color:#666;font-size:.92rem}
+</style></head><body>
+<h1>KoCaseImport</h1>
+<p>헌법재판소 사건번호를 입력하면 공식 결정문 PDF를 가져와 Commons → 한국어 위키문헌 ProofreadPage 흐름으로 처리합니다.</p>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="post" action="/jobs">
+<label>사건번호</label><input name="case_number" type="text" placeholder="2016헌나1" required>
+<label>PDF URL override <span class="muted">(자동 탐색 실패 시에만, ccourt.go.kr 공식 주소)</span></label><input name="pdf_url" type="text" placeholder="https://...ccourt.go.kr/...pdf">
+<div class="row"><label><input type="checkbox" name="live" value="1" {% if not live_enabled %}disabled{% endif %}> 실제 Commons/위키문헌 편집</label>
+<button type="submit">가져오기 작업 만들기</button></div>
+{% if not live_enabled %}<p class="muted">서버의 KOCASE_LIVE_EDITS=false이므로 현재는 dry-run만 가능합니다.</p>{% endif %}
+</form>
+<h2>최근 작업</h2><table><tr><th>ID</th><th>사건</th><th>상태</th><th>단계</th></tr>
+{% for j in jobs %}<tr><td><a href="/jobs/{{j.id}}">{{j.id}}</a></td><td>{{j.case_number}}</td><td>{{j.status}}</td><td>{{j.step}}</td></tr>{% endfor %}
+</table></body></html>
