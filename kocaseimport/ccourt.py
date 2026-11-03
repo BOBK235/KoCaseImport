@@ -73,7 +73,7 @@ class CCourtClient:
     def _lookup_openapi(self, case_number: str) -> CaseMetadata:
         params = {"serviceKey": settings.ccourt_service_key,
                   settings.ccourt_case_param: case_number,
-                  "pageNo": 1, "numOfRows": 100, "_type": "json"}
+                  "pageNo": 1, "numOfRows": 100, "type": "json"}
         data = self._json(settings.ccourt_openapi_url, params, "헌재 OpenAPI")
         header = data.get("header")
         if not isinstance(header, dict) or "resultCode" not in header:
