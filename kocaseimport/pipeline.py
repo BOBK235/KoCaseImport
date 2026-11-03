@@ -36,8 +36,12 @@ class Pipeline:
         self.log(f"사건 조회: {case_number}")
         meta = self.ccourt.lookup(case_number, pdf_url_override=pdf_url_override)
         self.log(f"사건 확인: {meta.case_number} / {meta.case_name}")
-
-        base_name = sanitize_filename(f"{meta.case_number} {meta.case_name} 결정문") + ".pdf"
+        edition = meta.raw.get("source_edition", "결정문")
+        self.log(f"원문 판본: {edition} / {meta.source_page_url}")
+        for warning in meta.raw.get("lookup_warnings", []):
+            self.log(f"조회 알림: {warning}")
+        suffix = f" ({edition} 수록본)" if edition in {"판례집", "공보"} else ""
+        base_name = sanitize_filename(f"{meta.case_number} {meta.case_name} 결정문{suffix}") + ".pdf"
         job_dir = settings.work_dir / (self.job_id or meta.case_number)
         job_dir.mkdir(parents=True, exist_ok=True)
         pdf_path = job_dir / base_name
@@ -120,8 +124,9 @@ class Pipeline:
         category = f"\n[[Category:{settings.commons_category}]]" if settings.commons_category else ""
         date = meta.decision_date or ""
         source = meta.source_page_url or meta.pdf_url
+        edition = meta.raw.get("source_edition", "결정문")
         return f"""{{{{Information
-|description={{{{ko|{meta.case_number} {meta.case_name} 헌법재판소 결정문}}}}
+|description={{{{ko|{meta.case_number} {meta.case_name} 헌법재판소 결정문 (사용 판본: {edition})}}}}
 |date={date}
 |source={source}
 |author=대한민국 헌법재판소

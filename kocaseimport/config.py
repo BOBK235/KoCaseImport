@@ -29,7 +29,8 @@ class Settings:
 
     ccourt_service_key: str = os.getenv("CCOURT_SERVICE_KEY", "")
     ccourt_openapi_url: str = os.getenv("CCOURT_OPENAPI_URL", "")
-    ccourt_case_param: str = os.getenv("CCOURT_CASE_PARAM", "caseNo")
+    ccourt_case_param: str = os.getenv("CCOURT_CASE_PARAM", "eventNo")
+    ccourt_allow_published_pdf: bool = _bool("CCOURT_ALLOW_PUBLISHED_PDF", True)
 
     mw_bot_username: str = os.getenv("MW_BOT_USERNAME", "")
     mw_bot_password: str = os.getenv("MW_BOT_PASSWORD", "")
