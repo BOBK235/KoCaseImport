@@ -14,16 +14,30 @@ class MediaWikiError(RuntimeError):
 
 
 class MediaWikiClient:
-    def __init__(self, api_url: str) -> None:
+    def __init__(self, api_url: str, token_provider=None) -> None:
         self.api_url = api_url
+        self.token_provider = token_provider
         self.s = requests.Session()
         self.s.headers.update({"User-Agent": settings.user_agent})
-        if settings.mw_bearer_token:
+        if settings.mw_bearer_token and not token_provider:
             self.s.headers.update({"Authorization": f"Bearer {settings.mw_bearer_token}"})
-        self._logged_in = bool(settings.mw_bearer_token)
+        self._logged_in = bool(settings.mw_bearer_token) and not token_provider
         self._csrf = ""
 
+    def _authorize(self):
+        if self.token_provider is not None:
+            token = self.token_provider()
+            if not token:
+                raise MediaWikiError("사용자 OAuth 인증이 필요합니다.")
+            header = f"Bearer {token}"
+            if self.s.headers.get("Authorization") != header:
+                self._csrf = ""
+            self.s.headers["Authorization"] = header
+
     def login(self) -> None:
+        if self.token_provider is not None:
+            self._authorize()
+            return
         if self._logged_in:
             return
         if not settings.mw_bot_username or not settings.mw_bot_password:
@@ -40,6 +54,9 @@ class MediaWikiClient:
         self._logged_in = True
 
     def get(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._authorize()
+        if self.token_provider is not None:
+            params = {**params, "assert": "user"}
         params = {**params, "format": "json", "formatversion": 2}
         r = self.s.get(self.api_url, params=params, timeout=60)
         r.raise_for_status()
@@ -49,6 +66,9 @@ class MediaWikiClient:
         return data
 
     def post(self, data: dict[str, Any], files=None, raw: bool = False) -> dict[str, Any]:
+        self._authorize()
+        if self.token_provider is not None:
+            data = {**data, "assert": "user"}
         payload = {**data, "format": "json", "formatversion": 2}
         r = self.s.post(self.api_url, data=payload, files=files, timeout=180)
         r.raise_for_status()
@@ -82,8 +102,9 @@ class MediaWikiClient:
             "text": text,
             "summary": summary,
             "token": self.csrf_token(),
-            "bot": 1,
         }
+        if self.token_provider is None:
+            data["bot"] = 1
         if createonly:
             data["createonly"] = 1
         if contentformat:
@@ -99,6 +120,8 @@ class MediaWikiClient:
             if images:
                 return images[0]["name"]
         except MediaWikiError:
+            if self.token_provider is not None:
+                raise
             return ""
         return ""
 
@@ -130,6 +153,11 @@ class MediaWikiClient:
     def user_name(self) -> str:
         try:
             data = self.get({"action": "query", "meta": "userinfo"})
-            return data.get("query", {}).get("userinfo", {}).get("name", settings.mw_bot_username.split("@", 1)[0])
+            name = data.get("query", {}).get("userinfo", {}).get("name")
+            if self.token_provider is not None and not name:
+                raise MediaWikiError("OAuth 사용자 이름을 확인하지 못했습니다.")
+            return name or settings.mw_bot_username.split("@", 1)[0]
         except Exception:
+            if self.token_provider is not None:
+                raise
             return settings.mw_bot_username.split("@", 1)[0]

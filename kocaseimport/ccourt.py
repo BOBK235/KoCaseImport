@@ -21,7 +21,8 @@ class CCourtClient:
     ISEARCH_BASE = "https://isearch.ccourt.go.kr/"
     VIEW_API = ISEARCH_BASE + "api/index/searcher/view"
 
-    def __init__(self) -> None:
+    def __init__(self, on_case=None) -> None:
+        self.on_case = on_case or (lambda: None)
         self.s = requests.Session()
         self.s.headers.update({"User-Agent": settings.user_agent,
                                "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.5"})
@@ -63,6 +64,8 @@ class CCourtClient:
             raise CCourtError("CCOURT_OPENAPI_URL과 CCOURT_SERVICE_KEY를 함께 설정하세요.")
         meta = (self._lookup_openapi(case_number) if settings.ccourt_openapi_url
                 else CaseMetadata(case_number=case_number))
+        if meta.raw.get("openapi"):
+            self.on_case()
         if pdf_url_override:
             meta.pdf_url = pdf_url_override
             meta.case_name = meta.case_name or f"{case_number} 결정"
@@ -130,6 +133,7 @@ class CCourtClient:
             raise CCourtError("헌재 iSearch: 응답의 사건번호가 요청과 일치하지 않습니다.")
         if params.get("docId") and item.get("docId") != params["docId"]:
             raise CCourtError("헌재 iSearch: 응답의 문서 식별자가 요청과 일치하지 않습니다.")
+        self.on_case()
         return item
 
     def _resolve_pdf(self, meta: CaseMetadata) -> CaseMetadata:

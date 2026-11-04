@@ -24,13 +24,18 @@ class Settings:
     live_edits: bool = _bool("KOCASE_LIVE_EDITS", False)
     user_agent: str = os.getenv(
         "KOCASE_USER_AGENT",
-        "KoCaseImport/0.1 (https://ko.wikisource.org/)"
+        "KoCaseImport/0.2.0 (https://ko.wikisource.org/)"
     )
 
     ccourt_service_key: str = os.getenv("CCOURT_SERVICE_KEY", "")
     ccourt_openapi_url: str = os.getenv("CCOURT_OPENAPI_URL", "")
     ccourt_case_param: str = os.getenv("CCOURT_CASE_PARAM", "eventNo")
     ccourt_allow_published_pdf: bool = _bool("CCOURT_ALLOW_PUBLISHED_PDF", True)
+
+    oauth_client_id: str = os.getenv("MW_OAUTH_CLIENT_ID", "")
+    oauth_client_secret: str = os.getenv("MW_OAUTH_CLIENT_SECRET", "")
+    oauth_redirect_uri: str = os.getenv("MW_OAUTH_REDIRECT_URI", "")
+    token_key: str = os.getenv("KOCASE_TOKEN_KEY", "")
 
     mw_bot_username: str = os.getenv("MW_BOT_USERNAME", "")
     mw_bot_password: str = os.getenv("MW_BOT_PASSWORD", "")

@@ -1,6 +1,6 @@
 [project]
 name = "kocaseimport"
-version = "0.1.0"
+version = "0.2.0"
 description = "Import Korean Constitutional Court decisions into Wikimedia Commons and Korean Wikisource"
 requires-python = ">=3.11"
 

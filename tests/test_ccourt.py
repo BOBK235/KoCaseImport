@@ -44,6 +44,7 @@ def test_api_mapping_and_published_pdf_token(monkeypatch):
     params = c._json.call_args_list[0].args[1]
     assert params['eventNo'] == '2016헌나1' and params['serviceKey'] == 'secret-example'
     assert 'caseNo' not in params
+    assert params['type'] == 'json' and '_type' not in params
     assert meta.raw['source_edition'] == '판례집'
     assert meta.doc_id == '48728_010300'
     assert urlsplit(meta.pdf_url).path == '/downloadEX.do'

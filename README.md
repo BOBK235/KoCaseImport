@@ -1,144 +1,123 @@
-# KoCaseImport 0.1.1
+# KoCaseImport 0.2.0
 
-헌법재판소 사건번호를 입력해 공식 결정문 PDF를 확보하고, Wikimedia Commons와 한국어 위키문헌의 ProofreadPage 구조까지 만드는 Toolforge용 MVP입니다.
+헌법재판소 공식 자료를 Commons와 한국어 위키문헌으로 가져오는 Toolforge용 Python 도구입니다. 웹 이용자는 Wikimedia OAuth2로 로그인하고 자신의 최근 작업과 간단한 처리 결과만 볼 수 있습니다.
 
-## 처리 흐름
+## 변경 내용
 
-1. 사건번호 정규화 (`2016헌나1` 등)
-2. 헌법재판소 공식 자료에서 사건 메타데이터와 PDF 탐색
-   - 공공데이터포털 OpenAPI가 설정되어 있으면 이를 우선 사용
-   - `dtmPpHp`의 docId로 iSearch 상세 JSON을 조회하고 `pdfFilePath`를 `downloadEX.do`에 전달
-   - 결정문 PDF가 없으면 공식 판례집·공보의 해당 사건 PDF를 사용하고 판본을 명시
-   - 검색 구조가 바뀐 경우 웹 UI에서 `PDF URL override`를 지정할 수 있음
-3. PDF 다운로드 및 SHA-1 계산
-4. Commons에서 동일 SHA-1 파일 검색 후 재사용, 없으면 업로드
-5. 한국어 위키문헌 `색인:<파일명>` 생성
-6. PDF 각 쪽의 텍스트 레이어를 우선 추출
-7. 텍스트가 없거나 품질이 낮은 쪽은 Wikimedia OCR(Tesseract `kor`) 호출
-8. `페이지:<파일명>/N`을 `교정 안 됨` 상태로 생성
-9. 사건번호 이름의 본문 문서를 만들고 `<pages>`로 전체 쪽을 합침
+- OAuth2 Authorization Code + PKCE(S256), 10분 유효·1회용 state 검증.
+- Meta의 OAuth profile에서 확인한 중앙 사용자 ID(sub)로 작업 소유자 구분.
+- 사용자별 access/refresh token 암호화 저장. 쿠키에는 임의 세션 식별자만 저장.
+- 웹 작업의 양쪽 위키 API 요청은 신청자 토큰 사용. 공용 봇이나 전역 Bearer token으로 대체하지 않음.
+- 자신의 최근 30개 작업. 타인 작업 주소 접근은 404, 비로그인은 401.
+- 작업 화면: 사건 조회·확인, PDF 다운로드 결과·쪽수, 원문 판본, Dry-run 여부. 완료/후속 실패는 조회 상태에 짧게 표시.
+- 전체 JSON, 상세 단계, 내부 경로, 로그, traceback은 사용자 HTML에 전달하지 않음.
+- CSRF 검증, Secure/HttpOnly/SameSite 쿠키, 인증 후 세션 교체.
+- 기본은 Dry-run. Dry-run도 로그인 필요.
 
-## 중요한 운영 원칙
+## OAuth 애플리케이션 등록
 
-- 자동 OCR 결과는 항상 **교정 안 됨(level 1)** 으로 저장합니다.
-- 판결·결정문 자체에만 `{{PD-KoreaGov}}`를 적용하도록 설계했습니다. 보도자료·해설·편집물에는 사용하지 마세요.
-- 기본값은 dry-run입니다. 실제 업로드/편집은 `.env`의 `KOCASE_LIVE_EDITS=true`와 작업 화면의 확인 체크가 모두 있어야 수행됩니다.
-- 공개 운영 전에 한국어 위키문헌 공동체 합의와 봇 계정 승인을 권장합니다.
+https://meta.wikimedia.org/wiki/Special:OAuthConsumerRegistration/propose
 
-## 설치
+- OAuth 2.0, confidential 웹 애플리케이션. owner-only가 아닌 여러 사용자가 승인하는 앱으로 등록.
+- Authorization Code 및 Refresh Token 사용.
+- 콜백: `https://실제도구이름.toolforge.org/oauth/callback` (정확히 일치).
+- Commons와 한국어 위키문헌 모두 사용할 수 있는 프로젝트 범위.
+- 사용자 식별, 필요한 문서 생성·편집 및 파일 업로드 권한. 식별 전용(authonly) 앱으로는 게시 불가.
+- 등록자 계정으로 먼저 시험 가능. 다른 사용자 이용에는 Wikimedia 측 앱 승인 필요.
 
-```bash
-python3 -m venv venv
-. venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# .env 편집
-python -m kocaseimport.init_db
-```
-
-웹 UI:
-
-```bash
-gunicorn -b 0.0.0.0:8000 'kocaseimport.app:create_app()'
-```
-
-워커(별도 프로세스):
-
-```bash
-python -m kocaseimport.worker
-```
-
-CLI 단일 실행:
-
-```bash
-python -m kocaseimport.cli 2016헌나1 --live
-```
-
-`--pdf-url`을 주면 사건 검색 단계에서 결정문 PDF URL만 수동 보정할 수 있습니다.
+OAuth 앱은 직접 등록해야 하며 발급된 인증정보는 소스에 포함되어 있지 않습니다.
 
 ## Toolforge 업데이트
 
-이 패키지 폴더의 내용을 기존 Git 저장소 루트에 반영합니다. 폴더 전체를 저장소 안에 한 단계 더 중첩하지 마세요. `.env`와 자격증명은 커밋하지 않습니다.
+프로젝트 폴더 내용을 기존 Git 저장소 루트에 반영합니다. 중첩 폴더를 만들지 마세요. requirements.txt, 새 auth.py, store.py, 모든 templates를 포함해 전체 변경을 반영합니다. `.env`와 인증정보는 커밋하지 않습니다.
 
-이번 변경 파일: `kocaseimport/ccourt.py`, `kocaseimport/config.py`, `kocaseimport/pipeline.py`, `Procfile`, `.env.example`, `tests/test_ccourt.py`, `README.md`, `UPDATE-0.1.1.md`.
-`Procfile`은 `web: bash toolforge-start.sh`로 되어 있습니다.
+기존 CCOURT_OPENAPI_URL, CCOURT_SERVICE_KEY, CCOURT_CASE_PARAM=eventNo, CCOURT_ALLOW_PUBLISHED_PDF 설정은 유지합니다. getIncdntDetail에는 `type=json`을 보냅니다.
 
-Toolforge 도구 계정에서 아래 두 비밀이 아닌 설정값을 등록/갱신합니다.
+도구 계정에서 각각 실행하고 프롬프트에 값을 입력합니다.
 
 ```bash
-toolforge envvars create CCOURT_CASE_PARAM eventNo
-toolforge envvars create CCOURT_ALLOW_PUBLISHED_PDF true
+toolforge envvars create MW_OAUTH_CLIENT_ID
+toolforge envvars create MW_OAUTH_CLIENT_SECRET
+toolforge envvars create MW_OAUTH_REDIRECT_URI
+toolforge envvars create KOCASE_TOKEN_KEY
 ```
 
-기존 `CCOURT_OPENAPI_URL`의 getIncdntDetail 전체 주소와 `CCOURT_SERVICE_KEY`는 유지합니다.
-수정 소스를 커밋·푸시하고 다음을 실행합니다. 아래 저장소 주소는 실제 주소로 바꾸세요.
+앞의 두 값은 앱 등록 시 발급받습니다. MW_OAUTH_REDIRECT_URI 예: `https://kocaseimport.toolforge.org/oauth/callback` (실제 도구 주소로 변경).
+
+KOCASE_TOKEN_KEY 생성에는 표준 Python만 필요합니다.
+
+```bash
+python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'
+```
+
+출력값을 KOCASE_TOKEN_KEY 입력 프롬프트에 붙여 넣습니다. 이 키는 OAuth 토큰을 암호화하므로 공개하지 않습니다. 변경하면 기존 토큰을 읽을 수 없어 재로그인이 필요합니다.
+
+KOCASE_SECRET_KEY도 32자 이상의 임의 문자열이어야 합니다. 기존 값이 이 조건을 만족하면 유지합니다. 필요할 때 생성·등록합니다.
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+toolforge envvars create KOCASE_SECRET_KEY
+```
+
+OAuth 설정이나 키가 누락되면 앱은 기동하지 않고 운영자 로그에 설정 이름을 알립니다. 최초 적용은 KOCASE_LIVE_EDITS=false를 유지합니다.
+
+소스 커밋·푸시 후 실제 저장소 주소로 빌드합니다.
 
 ```bash
 toolforge build start https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
 ```
 
-빌드 성공 후에만 재시작합니다.
+빌드 성공 후:
 
 ```bash
 toolforge webservice buildservice restart
 ```
 
-웹 화면에서 `2016헌나1`을 새 작업으로 제출하고 실제 업로드는 선택하지 않습니다.
-이 버전은 웹과 워커를 같은 컨테이너에서 실행합니다. SQLite 큐를 공유하지 않는 별도 Job으로 워커를 분리하지 마세요. `/tmp`의 작업 기록은 컨테이너가 교체되면 유실될 수 있습니다.
+Procfile: `web: bash toolforge-start.sh`. 같은 컨테이너에서 웹과 워커를 실행합니다.
 
-## 헌법재판소 OpenAPI와 PDF 판본
+## 최초 확인
 
-공공데이터포털의 사건정보 조회 서비스 `/getIncdntDetail`에 `eventNo`, `serviceKey`를 보냅니다. `CCOURT_OPENAPI_URL`에는 활용신청 화면의 전체 요청 URL을 넣습니다. 키를 URL에 직접 붙이지 않습니다. 요청은 `_type=json`을 사용하며 JSON 응답을 요구합니다.
+1. 홈페이지에서 Wikimedia 계정으로 로그인합니다.
+2. `2016헌나1`을 Dry-run으로 제출하고 자신의 목록과 네 항목을 확인합니다.
+3. 앱 승인 후 다른 계정에서 앞 계정 작업이 목록과 직접 주소 접근 모두에서 보이지 않는지 확인합니다.
+4. 게시 시험 때 KOCASE_LIVE_EDITS=true로 등록하고 재시작합니다. 웹에서 본인 계정 게시 확인란을 선택한 작업만 게시합니다.
 
-| API 필드 | 사용 |
-| --- | --- |
-| `header.resultCode` | 0 또는 00을 성공으로 처리 |
-| `body.items.item[].eventNo` | 요청한 사건번호와 정확히 대조 |
-| `eventNm` | 사건명, 앞뒤 공백 제거 |
-| `endDate` / `adjuDate` | 종국일자, 없으면 선고일자; YYYY-MM-DD로 변환 |
-| `endRsta` | 종국결과 |
-| `dtmPpHp` | 원본 결정문 상세 화면 |
-| `dtmPpXml` | XML 출처로 보존; PDF로 취급하지 않음 |
-| `pdntList[].pdntHp` | 판례집 수록본 상세 화면 |
-| `ogList[].ogHp` | 공보 수록본 상세 화면 |
+웹 작업은 MW_BOT_USERNAME, MW_BOT_PASSWORD, MW_BEARER_TOKEN을 사용하지 않습니다. CLI에는 운영자용 인증 방식이 남아 있습니다.
 
-메타데이터는 사용자 제공 getIncdntDetail 응답 구조에 맞춰 명시적으로 파싱합니다. 인증 실패·HTTP 오류·비JSON 응답·일치하는 사건 없음은 숨기지 않고 중단합니다. 요청 URL/인증키를 예외 메시지에 출력하지 않습니다.
+## 세션과 기록
 
-iSearch는 현재 사이트 JavaScript가 사용하는 `api/index/searcher/view`의 `returnObject["00"]`를 읽습니다. `pdfFilePath`는 암호화된 값일 수 있으므로 임의 해석하지 않고 URL 인코딩해 `downloadEX.do`의 `filePath`에 전달합니다. API의 XML 경로를 문자열 치환해서 PDF를 만들지 않습니다.
+- 로그인 및 로컬 인증 연결은 최대 12시간. access token은 만료 전에 갱신하며 실패 시 공용 계정으로 전환하지 않습니다.
+- 로그아웃은 현재 로그인에 연결된 로컬 토큰을 삭제하고 대기 작업을 중단합니다. 실행 중 작업의 다음 Wikimedia API 요청도 차단합니다. 이미 전송된 요청이나 완료된 편집은 되돌리지 않습니다.
+- 로그아웃은 Wikimedia 전체 로그아웃이나 공급자 측 권한 철회가 아닙니다. 앱 권한 철회는 Wikimedia의 연결 앱 관리 화면에서 합니다.
+- 같은 계정으로 다시 로그인하면 보존된 자신의 작업을 볼 수 있습니다. 실패 작업 자동 재개는 없으며 새 작업을 제출해야 합니다.
+- 기존 0.1.1 작업은 소유자를 확인할 수 없어 누구에게도 배정하지 않습니다. 기록은 내부에 남지만 웹에서 숨기고 소유자 없는 대기 작업은 실행하지 않습니다.
+- 상세 처리 기록은 내부 DB와 Toolforge 로그에만 남습니다. OAuth 토큰·인증 응답은 기록하지 않습니다. 예외는 작업 ID와 유형으로만 기록합니다.
 
-결정문 PDF가 없으면 기본적으로 판례집, 공보 순서로 PDF를 찾습니다. 선택한 판본은 파일명, 작업 로그, manifest, Commons 설명에 기록합니다. 판례집·공보에는 판시사항·결정요지 등이 함께 있을 수 있으며 원본 결정문의 쪽수·편집과 같다고 가정하지 않습니다. 이 대체 사용을 금지하려면 `CCOURT_ALLOW_PUBLISHED_PDF=false`로 설정하세요.
+## 배포 범위와 한계
 
-OpenAPI 두 설정을 모두 생략하면 iSearch의 eventNo 상세 조회를 시도합니다. 한 설정만 입력한 경우에는 설정 오류를 알립니다. `PDF URL override`를 넣으면 자동 PDF 탐색을 건너뛰지만, 설정된 OpenAPI 메타데이터 조회는 수행합니다.
+이번 요청의 OAuth/사용자별 작업/UI를 구현한 단일 컨테이너 버전입니다. 기본 DB는 `/tmp/kocaseimport/jobs.sqlite3`, 작업 파일은 `/tmp/kocaseimport/work`입니다. 컨테이너 교체 시 세션·토큰·기록·PDF가 유실될 수 있어 재로그인이 필요합니다. 별도 Job으로 워커를 분리하지 마세요. ToolsDB 전환, 장기 기록 보존, 중단 작업 재개와 전체 사용량 제한은 포함하지 않았습니다.
 
-## 인증
+기존 판본 선택은 유지합니다. 결정문 PDF가 없으면 판례집·공보 PDF를 사용할 수 있고 판본을 표시합니다. 자동 전사는 교정 안 됨으로 생성하며 기존 문서는 기본적으로 덮어쓰지 않습니다.
 
-0.1은 운영을 단순화하기 위해 **전용 봇 계정** 방식입니다. `MW_BOT_USERNAME`과 `MW_BOT_PASSWORD`에 BotPassword 자격을 넣습니다. OAuth2 bearer token도 지원합니다.
+Dry-run 완료는 사건 조회·PDF 다운로드·쪽수 및 SHA-1 확인 완료이며 게시·OCR 성공을 뜻하지 않습니다.
 
-공개 다중 사용자 버전에서는 각 사용자의 OAuth2 Authorization Code Flow로 바꾸는 것이 다음 단계입니다.
+## 개발 및 검증
 
-## 파일 이름
-
-기본 파일명은 다음과 같습니다.
-
-```text
-<사건번호> <사건명> 결정문.pdf
+```bash
+python3 -m venv venv
+. venv/bin/activate
+pip install -r requirements.txt
+pip install pytest
+pytest -q
 ```
 
-예: `2016헌나1 대통령(박근혜) 탄핵 결정문.pdf`
+테스트는 로컬 DB·테스트 키·모의 Wikimedia 응답을 사용합니다. 사용자별 접근 격리, state 재사용 차단, CSRF, 토큰 암호화·갱신·로그아웃, 웹 출력 제한, 워커와 양쪽 위키의 사용자 인증 전달을 검증합니다.
 
-## 안전장치
+실제 client ID/secret이 제공되지 않아 실제 계정 로그인·승인·게시의 종단간 검증은 수행하지 않았습니다. Toolforge 직접 배포도 수행하지 않았습니다.
 
-- 기존 Commons 파일 SHA-1 중복 검사
-- 기존 색인/페이지/본문은 기본적으로 덮어쓰지 않음
-- 실제 편집 이중 확인
-- 모든 단계 로그 저장
-- PDF 시그니처 검증
-- 공식 `ccourt.go.kr` / `isearch.ccourt.go.kr` 다운로드 URL만 자동 허용
+## 공식 참고 문서
 
-## 알려진 한계
-
-iSearch 상세 JSON은 사이트 내부 인터페이스이므로 향후 변경될 수 있습니다. HWP를 PDF로 변환하는 기능은 없습니다. 0.1.1 검증은 getIncdntDetail 사용자 제공 샘플의 파싱 및 실제 iSearch 조회·PDF 다운로드까지이며, 인증키가 필요한 OpenAPI 실호출과 Wikimedia 실게시, Toolforge 재배포는 이 환경에서 수행하지 않았습니다.
-
-## Toolforge 0.1 single-container deployment note
-
-The included `Procfile` and `toolforge-start.sh` run the Flask/Gunicorn web UI and queue worker in the same container. This is intentional for 0.1 because the queue uses SQLite under `/tmp` by default. The queue is therefore ephemeral and will be lost when the webservice container restarts. Before production use, migrate the queue/state database to ToolsDB (or another supported shared service) and run the worker as a separate Toolforge job.
+- https://www.mediawiki.org/wiki/OAuth/For_Developers
+- https://www.mediawiki.org/wiki/Extension:OAuth
+- https://wikitech.wikimedia.org/wiki/Help:Toolforge/Envvars
+- https://wikitech.wikimedia.org/wiki/Help:Toolforge/Build_Service

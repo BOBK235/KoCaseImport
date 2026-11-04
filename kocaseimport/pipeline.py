@@ -10,15 +10,20 @@ from .config import settings
 from .mediawiki import MediaWikiClient
 from .models import ImportManifest
 from .ocr import OCRClient
-from .store import append_log, update_job
+from .store import append_log, update_job, update_summary
 from .utils import sanitize_filename, sha1_file
 from .wikisource import WikisourceBuilder
 
 
 class Pipeline:
-    def __init__(self, job_id: str | None = None) -> None:
+    def __init__(self, job_id: str | None = None, token_provider=None) -> None:
         self.job_id = job_id
-        self.ccourt = CCourtClient()
+        self.token_provider = token_provider
+        self.ccourt = CCourtClient(on_case=lambda: self.summary(case_confirmed=True))
+
+    def summary(self, **fields):
+        if self.job_id:
+            update_summary(self.job_id, **fields)
 
     def log(self, msg: str) -> None:
         print(msg, flush=True)
@@ -32,11 +37,15 @@ class Pipeline:
     def run(self, case_number: str, live: bool = False, pdf_url_override: str = "") -> ImportManifest:
         settings.prepare()
         effective_live = bool(live and settings.live_edits)
+        self.summary(dry_run=not effective_live)
+        if self.job_id and effective_live and self.token_provider is None:
+            raise RuntimeError("웹 작업에는 사용자별 OAuth 인증이 필요합니다.")
         self.step("case_lookup")
         self.log(f"사건 조회: {case_number}")
         meta = self.ccourt.lookup(case_number, pdf_url_override=pdf_url_override)
         self.log(f"사건 확인: {meta.case_number} / {meta.case_name}")
         edition = meta.raw.get("source_edition", "결정문")
+        self.summary(case_confirmed=True, edition=edition)
         self.log(f"원문 판본: {edition} / {meta.source_page_url}")
         for warning in meta.raw.get("lookup_warnings", []):
             self.log(f"조회 알림: {warning}")
@@ -50,6 +59,7 @@ class Pipeline:
         self.ccourt.download_pdf(meta, pdf_path)
         sha1 = sha1_file(pdf_path)
         page_count = len(PdfReader(str(pdf_path)).pages)
+        self.summary(pdf_downloaded=True, page_count=page_count)
         self.log(f"PDF 다운로드: {page_count}쪽 / SHA1 {sha1}")
 
         manifest = ImportManifest(
@@ -66,8 +76,8 @@ class Pipeline:
             self._save_manifest(job_dir, manifest)
             return manifest
 
-        commons = MediaWikiClient(settings.commons_api)
-        wikisource = MediaWikiClient(settings.wikisource_api)
+        commons = MediaWikiClient(settings.commons_api, token_provider=self.token_provider)
+        wikisource = MediaWikiClient(settings.wikisource_api, token_provider=self.token_provider)
         commons.login()
         wikisource.login()
 

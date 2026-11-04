@@ -1,19 +1,19 @@
-<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KoCaseImport</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 16px;line-height:1.55}label{display:block;margin:.8rem 0 .25rem}input[type=text]{width:100%;box-sizing:border-box;padding:.6rem}.row{display:flex;gap:1rem;align-items:center;margin:1rem 0}button{padding:.65rem 1rem}.error{background:#fee;border:1px solid #d33;padding:.8rem}table{width:100%;border-collapse:collapse;margin-top:2rem}th,td{padding:.5rem;border-bottom:1px solid #ddd;text-align:left}.muted{color:#666;font-size:.92rem}
-</style></head><body>
-<h1>KoCaseImport</h1>
-<p>헌법재판소 사건번호를 입력하면 공식 결정문 PDF를 가져와 Commons → 한국어 위키문헌 ProofreadPage 흐름으로 처리합니다.</p>
-{% if error %}<div class="error">{{ error }}</div>{% endif %}
-<form method="post" action="/jobs">
-<label>사건번호</label><input name="case_number" type="text" placeholder="2016헌나1" required>
-<label>PDF URL override <span class="muted">(자동 탐색 실패 시에만, ccourt.go.kr 공식 주소)</span></label><input name="pdf_url" type="text" placeholder="https://...ccourt.go.kr/...pdf">
-<div class="row"><label><input type="checkbox" name="live" value="1" {% if not live_enabled %}disabled{% endif %}> 실제 Commons/위키문헌 편집</label>
-<button type="submit">가져오기 작업 만들기</button></div>
-{% if not live_enabled %}<p class="muted">서버의 KOCASE_LIVE_EDITS=false이므로 현재는 dry-run만 가능합니다.</p>{% endif %}
-</form>
-<h2>최근 작업</h2><table><tr><th>ID</th><th>사건</th><th>상태</th><th>단계</th></tr>
-{% for j in jobs %}<tr><td><a href="/jobs/{{j.id}}">{{j.id}}</a></td><td>{{j.case_number}}</td><td>{{j.status}}</td><td>{{j.step}}</td></tr>{% endfor %}
-</table></body></html>
+{% extends 'base.html' %}{% block content %}
+<h1>헌법재판소 결정문 가져오기</h1>
+<p>공식 원문을 확인하고, 내 Wikimedia 계정으로 Commons와 한국어 위키문헌에 가져옵니다.</p>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if not identity.owner_id %}
+<section><p>작업을 시작하려면 Wikimedia 계정으로 로그인해 주세요.</p><form method="post" action="{{ url_for('login') }}"><input type="hidden" name="csrf" value="{{ identity.csrf }}"><button type="submit">Wikimedia 계정으로 로그인</button></form></section>
+{% else %}
+<section><form method="post" action="{{ url_for('new_job') }}">
+<input type="hidden" name="csrf" value="{{ identity.csrf }}">
+<label for="case">사건번호</label><input id="case" name="case_number" type="text" placeholder="2016헌나1" maxlength="40" required>
+<details><summary>공식 PDF 주소 직접 지정</summary><label for="pdf">헌법재판소 PDF 주소</label><input id="pdf" name="pdf_url" type="url" placeholder="https://…ccourt.go.kr/…" maxlength="4096"></details>
+{% if live_enabled %}<label><input type="checkbox" name="live" value="1"> 내 계정으로 Commons 업로드 및 위키문헌 문서 생성을 실행합니다.</label>{% endif %}
+<p class="muted">{% if live_enabled %}선택하지 않으면 {% endif %}Dry-run으로 원문 확인과 PDF 다운로드만 진행합니다.</p><button type="submit">가져오기 시작</button>
+</form></section>
+<h2>자신의 최근 작업</h2>
+{% if jobs %}<div class="table-wrap"><table><thead><tr><th>사건</th><th>사건 조회</th><th>PDF 다운로드</th><th>원문 판본</th><th>Dry-run</th></tr></thead><tbody>
+{% for j in jobs %}<tr><td><a href="{{ url_for('job_detail',job_id=j.id) }}">{{ j.case_number }}</a></td><td>{{ j.case_status }}</td><td>{{ j.pdf_status }}{% if j.page_count %} · {{ j.page_count }}쪽{% endif %}</td><td>{{ j.edition }}</td><td>{{ '예' if j.dry_run else '아니요' }}</td></tr>{% endfor %}
+</tbody></table></div>{% else %}<p class="muted">아직 작업이 없습니다.</p>{% endif %}
+{% endif %}{% endblock %}
