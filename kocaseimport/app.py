@@ -5,8 +5,8 @@ from pathlib import Path
 from flask import Flask, abort, g, redirect, render_template, request, send_file, session, url_for
 from .config import settings
 from . import auth
-from .store import create_job, get_job, init_db, list_jobs, public_job
-from .utils import normalize_case_number
+from .store import create_job, get_job, init_db, list_jobs, public_job, queue_publication
+from .utils import normalize_case_number, resolve_job_pdf
 
 
 def create_app() -> Flask:
@@ -48,18 +48,18 @@ def create_app() -> Flask:
             return None
         # Older completed jobs recorded the path only in the final manifest.
         filename = summary.get('pdf_filename') or Path(job['payload'].get('pdf_path', '')).name
-        if not filename or Path(filename).name != filename or Path(filename).suffix.lower() != '.pdf':
-            return None
-        try:
-            root = settings.work_dir.resolve()
-            directory = root / job['id']
-            path = directory / filename
-            # No directories outside this job, including symlinks to other jobs.
-            if directory.parent != root or path.resolve() != path or not path.is_file():
-                return None
-            return path
-        except (OSError, ValueError, RuntimeError):
-            return None
+        return resolve_job_pdf(settings.work_dir, job['id'], filename)
+
+    def render_job(job, error=None, status=200):
+        pdf_available = downloaded_pdf(job) is not None
+        completed_dry_run = job['status'] == 'done' and not job['live']
+        manifest_ready = all(job['payload'].get(k) for k in ('case', 'pdf_path', 'pdf_sha1', 'page_count'))
+        return render_template(
+            'job.html', job=public_job(job), identity=g.identity, error=error,
+            pdf_available=pdf_available, live_enabled=settings.live_edits,
+            completed_dry_run=completed_dry_run,
+            can_publish=completed_dry_run and pdf_available and manifest_ready and settings.live_edits,
+        ), status
 
     def home(error=None):
         owner = g.identity.get('owner_id')
@@ -126,9 +126,25 @@ def create_app() -> Flask:
 
     @app.get('/jobs/<job_id>')
     def job_detail(job_id):
+        return render_job(owned_job(job_id))
+
+    @app.post('/jobs/<job_id>/publish')
+    def publish_job(job_id):
         job = owned_job(job_id)
-        return render_template('job.html', job=public_job(job), identity=g.identity,
-                               pdf_available=downloaded_pdf(job) is not None)
+        csrf()
+        # Repeat clicks redirect to the one existing publication attempt.
+        if job['live'] and job.get('reuse_pdf'):
+            return redirect(url_for('job_detail', job_id=job_id))
+        if not settings.live_edits:
+            return render_job(job, '현재 실제 게시가 비활성화되어 있습니다.', 400)
+        if job['live'] or job['status'] != 'done':
+            return render_job(job, '완료된 Dry-run 작업만 이어서 게시할 수 있습니다.', 400)
+        if downloaded_pdf(job) is None:
+            return render_job(job, '확인했던 PDF가 남아 있지 않습니다. 새 작업으로 다시 확인해 주세요.', 400)
+        auth.access_token(g.identity['auth_id'], g.identity['owner_id'])
+        if not queue_publication(job_id, owner_id=g.identity['owner_id'], auth_id=g.identity['auth_id']):
+            return render_job(job, '게시 준비 자료가 없습니다. 새 작업으로 다시 확인해 주세요.', 400)
+        return redirect(url_for('job_detail', job_id=job_id))
 
     @app.get('/jobs/<job_id>/pdf')
     def job_pdf(job_id):

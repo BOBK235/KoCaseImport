@@ -10,7 +10,7 @@ import pytest
 import requests
 from cryptography.fernet import Fernet
 
-from kocaseimport import auth, app as web, store, pipeline, mediawiki, worker
+from kocaseimport import auth, app as web, store, pipeline, mediawiki, worker, wikisource
 from kocaseimport.config import settings
 
 BASE = 'https://tool.example'
@@ -23,7 +23,7 @@ def env(tmp_path, monkeypatch):
                   oauth_client_id='client', oauth_client_secret='client-secret',
                   oauth_redirect_uri=BASE+'/oauth/callback', live_edits=False,
                   mw_bearer_token='SHARED-TOKEN-MUST-NOT-BE-USED')
-    for module in (auth, web, store, pipeline, mediawiki):
+    for module in (auth, web, store, pipeline, mediawiki, wikisource):
         monkeypatch.setattr(module, 'settings', cfg)
     app = web.create_app()
     app.testing = True
@@ -293,3 +293,157 @@ def test_pipeline_summary_and_both_wikis_use_owner(env,monkeypatch):
     assert url in c.get('/jobs/' + job, base_url=BASE).text
     with c.get(url, base_url=BASE) as response:
         assert response.status_code == 200
+
+
+def completed_dry_run(client, monkeypatch):
+    from pypdf import PdfWriter
+    from kocaseimport.models import CaseMetadata
+    court = Mock()
+    court.lookup.return_value = CaseMetadata(case_number='2016헌나1', case_name='확인한 사건',
+                                             raw={'source_edition': '판례집'})
+    def download(meta, dest):
+        writer = PdfWriter(); writer.add_blank_page(100, 100); writer.write(dest)
+    court.download_pdf.side_effect = download
+    monkeypatch.setattr(pipeline, 'CCourtClient', lambda **kw: court)
+    job_id = enqueue(client)
+    worker.run_job(store.claim_next_job())
+    assert store.get_job(job_id)['status'] == 'done'
+    return job_id, court
+
+
+def enable_publication(cfg, monkeypatch):
+    cfg = replace(cfg, live_edits=True)
+    for module in (web, store, pipeline, wikisource):
+        monkeypatch.setattr(module, 'settings', cfg)
+
+
+def test_publish_requires_owner_csrf_completed_dry_run_and_live_enabled(env, monkeypatch):
+    app, _, cfg = env
+    alice, bob = app.test_client(), app.test_client()
+    login(alice, 'alice'); login(bob, 'bob')
+    job_id, _ = completed_dry_run(alice, monkeypatch)
+    url = '/jobs/' + job_id + '/publish'
+    assert app.test_client().post(url, base_url=BASE).status_code == 401
+    assert bob.post(url, data={'csrf': csrf(bob)}, base_url=BASE).status_code == 404
+    assert alice.post(url, base_url=BASE).status_code == 400
+    assert alice.post(url, data={'csrf': csrf(alice)}, base_url=BASE).status_code == 400
+    assert store.get_job(job_id)['live'] == 0
+    enable_publication(cfg, monkeypatch)
+    pending = enqueue(alice)
+    assert alice.post('/jobs/'+pending+'/publish', data={'csrf': csrf(alice)}, base_url=BASE).status_code == 400
+    page = alice.get('/jobs/'+job_id, base_url=BASE)
+    assert '내 계정으로 공용·위키문헌에 이어서 게시' in page.text
+    assert '공용 업로드 완료' not in page.text and '위키문헌 업로드 완료' not in page.text
+    assert '실행하지 않음 (Dry-run)' in page.text
+    Path(store.get_job(job_id)['payload']['pdf_path']).unlink()
+    assert alice.post(url, data={'csrf': csrf(alice)}, base_url=BASE).status_code == 400
+    assert store.get_job(job_id)['live'] == 0
+
+
+@pytest.mark.parametrize('scenario', ['upload', 'reuse', 'fail_after_commons'])
+def test_dry_run_continues_once_with_same_pdf_and_incremental_links(env, monkeypatch, scenario):
+    from urllib.parse import unquote
+    app, _, cfg = env
+    alice = app.test_client(); first_identity, _ = login(alice, 'alice')
+    job_id, court = completed_dry_run(alice, monkeypatch)
+    original = store.get_job(job_id)['payload']
+    original_bytes = Path(original['pdf_path']).read_bytes()
+    # The grant from the dry run may have expired; use the current login.
+    identity, _ = login(alice, 'alice')
+    assert identity['auth_id'] != first_identity['auth_id']
+    enable_publication(cfg, monkeypatch)
+    url = '/jobs/' + job_id
+    for _ in range(2):
+        response = alice.post(url+'/publish', data={'csrf': csrf(alice), 'owner_id': '202'}, base_url=BASE)
+        assert response.status_code == 302 and response.location == url
+    claimed = store.claim_next_job()
+    assert claimed['id'] == job_id and claimed['auth_id'] == identity['auth_id']
+    assert claimed['owner_id'] == '101' and claimed['live'] == claimed['reuse_pdf'] == 1
+    assert store.claim_next_job() is None
+    assert len(store.list_jobs('101')) == 1
+    assert '내 계정으로 공용·위키문헌에 이어서 게시' not in alice.get(url, base_url=BASE).text
+    uploads, edits, clients = [], [], []
+    filename = '확인한 문서 & 결정.pdf'
+
+    class Wiki:
+        def __init__(self, api, token_provider):
+            clients.append((api, token_provider()))
+        def login(self): pass
+        def find_file_by_sha1(self, sha1):
+            assert sha1 == original['pdf_sha1']
+            return filename if scenario == 'reuse' else ''
+        def page_exists(self, title): return False
+        def upload_file(self, path, name, description, comment):
+            assert path.read_bytes() == original_bytes
+            uploads.append(name)
+            return {'upload': {'result': 'Success', 'filename': filename}}
+        def get_page_source(self, title): return ''
+        def user_name(self): return 'alice'
+        def edit_page(self, title, text, *args, **kwargs):
+            if title.startswith('색인:'):
+                # This is observed before any Wikisource edit has succeeded.
+                page = alice.get(url, base_url=BASE)
+                assert '공용 파일 보기' in page.text and '위키문헌 문서 보기' not in page.text
+                state = store.public_job(store.get_job(job_id))
+                assert unquote(state['commons_url']).endswith('/wiki/File:'+filename.replace(' ', '_'))
+                assert state['wikisource_status'] == '처리 중'
+                if scenario == 'fail_after_commons':
+                    raise RuntimeError('private-provider-error')
+            edits.append(title)
+
+    monkeypatch.setattr(pipeline, 'MediaWikiClient', Wiki)
+    ocr = Mock()
+    ocr.transcribe_pages.return_value = [('확인할 본문', 'pdf')]
+    monkeypatch.setattr(pipeline, 'OCRClient', lambda: ocr)
+    worker.run_job(claimed)
+    court.lookup.assert_called_once()
+    court.download_pdf.assert_called_once()
+    assert clients == [(cfg.commons_api, 'access-alice'), (cfg.wikisource_api, 'access-alice')]
+    assert len(uploads) == (0 if scenario == 'reuse' else 1)
+    result = store.get_job(job_id)
+    page = alice.get(url, base_url=BASE)
+    assert '공용 파일 보기' in page.text
+    assert '동일 파일 재사용' in page.text if scenario == 'reuse' else '공용 업로드 완료' in page.text
+    if scenario == 'fail_after_commons':
+        assert result['status'] == 'failed'
+        assert '위키문헌 업로드 완료' not in page.text and '위키문헌 문서 보기' not in page.text
+        assert 'private-provider-error' not in page.text
+    else:
+        assert result['status'] == 'done'
+        assert edits == ['색인:'+filename, '페이지:'+filename+'/1', '2016헌나1']
+        assert '위키문헌 업로드 완료' in page.text and '위키문헌 문서 보기' in page.text
+        assert unquote(store.public_job(result)['wikisource_url']) == 'https://ko.wikisource.org/wiki/2016헌나1'
+    # A stale form cannot queue another attempt, even after completion/failure.
+    assert alice.post(url+'/publish', data={'csrf': csrf(alice)}, base_url=BASE).status_code == 302
+    assert store.claim_next_job() is None
+
+
+@pytest.mark.parametrize('change', ['changed_pdf', 'live_disabled'])
+def test_queued_publication_stops_before_network_when_preparation_is_invalid(env, monkeypatch, change):
+    app, _, cfg = env
+    alice = app.test_client(); login(alice, 'alice')
+    job_id, _ = completed_dry_run(alice, monkeypatch)
+    enable_publication(cfg, monkeypatch)
+    assert alice.post('/jobs/'+job_id+'/publish', data={'csrf': csrf(alice)}, base_url=BASE).status_code == 302
+    if change == 'changed_pdf':
+        path = Path(store.get_job(job_id)['payload']['pdf_path'])
+        path.write_bytes(path.read_bytes() + b'changed')
+    else:
+        monkeypatch.setattr(pipeline, 'settings', cfg)
+    wiki = Mock()
+    monkeypatch.setattr(pipeline, 'MediaWikiClient', wiki)
+    worker.run_job(store.claim_next_job())
+    wiki.assert_not_called()
+    assert store.get_job(job_id)['status'] == 'failed'
+
+
+def test_success_labels_require_mediawiki_success_response(env, monkeypatch, tmp_path):
+    client = mediawiki.MediaWikiClient('https://commons.wikimedia.org/w/api.php', token_provider=lambda: 'token')
+    monkeypatch.setattr(client, 'csrf_token', lambda: 'csrf')
+    monkeypatch.setattr(client, 'post', lambda *a, **kw: {'edit': {'result': 'Failure', 'captcha': {}}})
+    with pytest.raises(mediawiki.MediaWikiError):
+        client.edit_page('title', 'body', 'summary')
+    path = tmp_path / 'test.pdf'; path.write_bytes(b'pdf')
+    monkeypatch.setattr(client, 'post', lambda *a, **kw: {'upload': {'result': 'Continue'}})
+    with pytest.raises(mediawiki.MediaWikiError):
+        client.upload_file(path, 'test.pdf', 'description', 'comment')

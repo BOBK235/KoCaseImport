@@ -1,8 +1,29 @@
 {% extends 'base.html' %}{% block title %}{{ job.case_number }} · KoCaseImport{% endblock %}
 {% block refresh %}{% if job.refresh %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
-{% block content %}<h1>{{ job.case_number }}</h1><section><dl>
+{% block content %}<h1>{{ job.case_number }}</h1>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<section><dl>
 <dt>사건 조회·확인</dt><dd>{{ job.case_status }}</dd>
 <dt>PDF 다운로드</dt><dd>{{ job.pdf_status }}{% if job.page_count %} · {{ job.page_count }}쪽{% endif %}{% if pdf_available %}<br><a href="{{ url_for('job_pdf', job_id=job.id) }}" download>검증용 PDF 내려받기</a>{% endif %}</dd>
 <dt>원문 판본</dt><dd>{{ job.edition }}</dd>
 <dt>Dry-run</dt><dd>{{ '예' if job.dry_run else '아니요' }}</dd>
-</dl></section><a href="{{ url_for('index') }}">자신의 최근 작업으로 돌아가기</a>{% endblock %}
+<dt>공용 업로드</dt><dd>{{ job.commons_status }}{% if job.commons_url %}<br><a href="{{ job.commons_url }}" target="_blank" rel="noopener noreferrer">공용 파일 보기</a>{% endif %}</dd>
+<dt>위키문헌 업로드</dt><dd>{{ job.wikisource_status }}{% if job.wikisource_url %}<br><a href="{{ job.wikisource_url }}" target="_blank" rel="noopener noreferrer">위키문헌 문서 보기</a>{% endif %}</dd>
+</dl></section>
+{% if completed_dry_run %}
+<section>
+<h2>확인한 PDF 게시</h2>
+{% if can_publish %}
+<p>이 작업에서 확인한 PDF로 공용 업로드와 위키문헌 문서 생성을 이어서 실행합니다. <strong>{{ identity.username }}</strong> 계정으로 실제 게시됩니다.</p>
+<form method="post" action="{{ url_for('publish_job', job_id=job.id) }}">
+<input type="hidden" name="csrf" value="{{ identity.csrf }}">
+<button type="submit">내 계정으로 공용·위키문헌에 이어서 게시</button>
+</form>
+{% elif not live_enabled %}
+<p class="muted">현재는 Dry-run만 사용할 수 있습니다. 운영자가 실제 게시를 활성화하면 이어서 게시할 수 있습니다.</p>
+{% else %}
+<p class="muted">이어 게시할 PDF 또는 확인 자료가 남아 있지 않습니다. 새 작업으로 다시 확인해 주세요.</p>
+{% endif %}
+</section>
+{% endif %}
+<a href="{{ url_for('index') }}">자신의 최근 작업으로 돌아가기</a>{% endblock %}

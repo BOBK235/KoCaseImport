@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 CASE_RE = re.compile(r"^(?P<year>\d{2,4})\s*(?P<type>헌[가나다라마바사아]|헌마|헌바|헌사|헌아)\s*(?P<num>\d+)(?P<etc>등)?$")
 
@@ -34,6 +34,28 @@ def sha1_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def wiki_page_url(api_url: str, title: str) -> str:
+    origin = urlparse(api_url)
+    return f"{origin.scheme}://{origin.netloc}/wiki/{quote(title.replace(' ', '_'), safe=':/')}"
+
+
+def resolve_job_pdf(work_dir: Path, job_id: str, filename: str) -> Path | None:
+    """Only accept a regular PDF directly inside this job's own directory."""
+    if (not filename or Path(filename).name != filename
+            or Path(filename).suffix.lower() != '.pdf'
+            or not job_id or Path(job_id).name != job_id or job_id in {'.', '..'}):
+        return None
+    try:
+        root = work_dir.resolve()
+        directory = root / job_id
+        path = directory / filename
+        if directory.parent != root or path.resolve() != path or not path.is_file():
+            return None
+        return path
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def is_official_ccourt_url(url: str) -> bool:

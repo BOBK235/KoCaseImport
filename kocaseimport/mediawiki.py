@@ -110,6 +110,8 @@ class MediaWikiClient:
         if contentformat:
             data["contentformat"] = contentformat
         result = self.post(data)
+        if result.get('edit', {}).get('result') != 'Success':
+            raise MediaWikiError("MediaWiki 문서 편집이 완료되지 않았습니다.")
         time.sleep(settings.edit_delay)
         return result
 
@@ -139,6 +141,8 @@ class MediaWikiClient:
             upload = result.get("upload", {})
             if upload.get("result") == "Warning":
                 raise MediaWikiError(f"Commons 업로드 경고로 중단: {upload.get('warnings', {})}")
+            if upload.get('result') != 'Success':
+                raise MediaWikiError("Commons 업로드가 완료되지 않았습니다.")
             return result
 
     def image_for_page(self, page_title: str) -> str:

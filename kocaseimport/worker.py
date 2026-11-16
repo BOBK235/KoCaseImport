@@ -25,6 +25,7 @@ def run_job(job):
             job["case_number"],
             live=bool(job["live"]),
             pdf_url_override=job.get("pdf_url_override", ""),
+            prepared_manifest=job['payload'] if job.get('reuse_pdf') else None,
         )
         update_job(job["id"], status="done", step="complete", payload=manifest.to_dict())
     except Exception as e:
