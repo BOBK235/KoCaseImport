@@ -2,7 +2,7 @@
 {% block refresh %}{% if job.refresh %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
 {% block content %}<h1>{{ job.case_number }}</h1><section><dl>
 <dt>사건 조회·확인</dt><dd>{{ job.case_status }}</dd>
-<dt>PDF 다운로드</dt><dd>{{ job.pdf_status }}{% if job.page_count %} · {{ job.page_count }}쪽{% endif %}</dd>
+<dt>PDF 다운로드</dt><dd>{{ job.pdf_status }}{% if job.page_count %} · {{ job.page_count }}쪽{% endif %}{% if pdf_available %}<br><a href="{{ url_for('job_pdf', job_id=job.id) }}" download>검증용 PDF 내려받기</a>{% endif %}</dd>
 <dt>원문 판본</dt><dd>{{ job.edition }}</dd>
 <dt>Dry-run</dt><dd>{{ '예' if job.dry_run else '아니요' }}</dd>
 </dl></section><a href="{{ url_for('index') }}">자신의 최근 작업으로 돌아가기</a>{% endblock %}

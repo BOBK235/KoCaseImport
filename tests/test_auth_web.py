@@ -2,6 +2,7 @@ import json
 import re
 import time
 from dataclasses import replace
+from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 from unittest.mock import Mock
 
@@ -143,6 +144,60 @@ def test_csrf_and_live_disabled_and_logout(env):
     assert store.get_job(job)['status'] == 'failed'
 
 
+def test_pdf_download_requires_owner_and_completed_download(env):
+    from pypdf import PdfWriter
+    app, _, cfg = env
+    alice, bob = app.test_client(), app.test_client()
+    login(alice, 'alice'); login(bob, 'bob')
+    job = enqueue(alice)
+    path = cfg.work_dir / job / '2016헌나1 결정문.pdf'
+    path.parent.mkdir()
+    writer = PdfWriter(); writer.add_blank_page(100, 100); writer.write(path)
+    url = '/jobs/' + job + '/pdf'
+    # A file on disk alone does not make an incomplete download available.
+    assert alice.get(url, base_url=BASE).status_code == 404
+    assert url not in alice.get('/jobs/' + job, base_url=BASE).text
+    store.update_summary(job, pdf_downloaded=True, page_count=1, pdf_filename=path.name)
+    response = alice.get(url, base_url=BASE)
+    assert response.status_code == 200 and response.data == path.read_bytes()
+    assert response.mimetype == 'application/pdf'
+    assert response.headers['Content-Disposition'].startswith('attachment;')
+    assert "filename*=UTF-8''" in response.headers['Content-Disposition']
+    assert response.headers['Cache-Control'] == 'no-store'
+    response.close()
+    page = alice.get('/jobs/' + job, base_url=BASE)
+    assert url in page.text and str(cfg.work_dir) not in page.text
+    assert bob.get(url, base_url=BASE).status_code == 404
+    assert app.test_client().get(url, base_url=BASE).status_code == 401
+    assert alice.get('/jobs/unknown/pdf', base_url=BASE).status_code == 404
+    path.unlink()
+    assert alice.get(url, base_url=BASE).status_code == 404
+    assert url not in alice.get('/jobs/' + job, base_url=BASE).text
+    # A symlink cannot expose another job's file.
+    other_job = enqueue(bob)
+    other_path = cfg.work_dir / other_job / path.name
+    other_path.parent.mkdir()
+    writer.write(other_path)
+    path.symlink_to(other_path)
+    assert alice.get(url, base_url=BASE).status_code == 404
+    assert url not in alice.get('/jobs/' + job, base_url=BASE).text
+
+
+def test_pdf_download_supports_existing_completed_job(env):
+    from pypdf import PdfWriter
+    app, _, cfg = env
+    client = app.test_client(); login(client, 'alice')
+    job = enqueue(client)
+    path = cfg.work_dir / job / 'existing.pdf'
+    path.parent.mkdir()
+    writer = PdfWriter(); writer.add_blank_page(100, 100); writer.write(path)
+    store.update_summary(job, pdf_downloaded=True, page_count=1)
+    store.update_job(job, status='done', payload={'pdf_path': str(path)})
+    response = client.get('/jobs/' + job + '/pdf', base_url=BASE)
+    assert response.status_code == 200 and response.data == path.read_bytes()
+    response.close()
+
+
 def test_refresh_rotation_and_session_expiry(env):
     app, seen, _ = env
     c=app.test_client(); ident,sid=login(c,'alice')
@@ -216,9 +271,14 @@ def test_pipeline_summary_and_both_wikis_use_owner(env,monkeypatch):
             writer=PdfWriter();writer.add_blank_page(100,100);writer.write(dest)
     monkeypatch.setattr(pipeline,'CCourtClient',Court)
     provider=lambda:auth.access_token(ident['auth_id'],'101')
-    pipeline.Pipeline(job,token_provider=provider).run('2016헌나1',live=False)
+    manifest = pipeline.Pipeline(job,token_provider=provider).run('2016헌나1',live=False)
     summary=store.public_job(store.get_job(job))
     assert summary['page_count']==1 and summary['edition']=='판례집' and summary['dry_run'] is True
+    assert 'pdf_filename' not in summary
+    url = '/jobs/' + job + '/pdf'
+    assert url in c.get('/jobs/' + job, base_url=BASE).text
+    with c.get(url, base_url=BASE) as response:
+        assert response.status_code == 200 and response.data == Path(manifest.pdf_path).read_bytes()
     monkeypatch.setattr(pipeline,'settings',replace(cfg,live_edits=True))
     clients=[]
     class StopBeforePublish:
@@ -229,3 +289,7 @@ def test_pipeline_summary_and_both_wikis_use_owner(env,monkeypatch):
         pipeline.Pipeline(job,token_provider=provider).run('2016헌나1',live=True)
     assert clients==[(cfg.commons_api,'access-alice'),(cfg.wikisource_api,'access-alice')]
     assert store.public_job(store.get_job(job))['dry_run'] is False
+    store.update_job(job, status='failed')
+    assert url in c.get('/jobs/' + job, base_url=BASE).text
+    with c.get(url, base_url=BASE) as response:
+        assert response.status_code == 200

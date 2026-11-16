@@ -59,7 +59,7 @@ class Pipeline:
         self.ccourt.download_pdf(meta, pdf_path)
         sha1 = sha1_file(pdf_path)
         page_count = len(PdfReader(str(pdf_path)).pages)
-        self.summary(pdf_downloaded=True, page_count=page_count)
+        self.summary(pdf_downloaded=True, page_count=page_count, pdf_filename=base_name)
         self.log(f"PDF 다운로드: {page_count}쪽 / SHA1 {sha1}")
 
         manifest = ImportManifest(

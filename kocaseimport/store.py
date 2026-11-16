@@ -132,7 +132,7 @@ def append_log(job_id: str, message: str) -> None:
 
 
 def update_summary(job_id: str, **fields) -> None:
-    allowed = {"case_confirmed", "pdf_downloaded", "page_count", "edition", "dry_run"}
+    allowed = {"case_confirmed", "pdf_downloaded", "page_count", "pdf_filename", "edition", "dry_run"}
     with _connect() as con:
         con.execute("BEGIN IMMEDIATE")
         row = con.execute("SELECT summary FROM jobs WHERE id=?", (job_id,)).fetchone()

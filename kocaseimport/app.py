@@ -1,6 +1,8 @@
 from __future__ import annotations
 import hmac
-from flask import Flask, abort, g, redirect, render_template, request, session, url_for
+import json
+from pathlib import Path
+from flask import Flask, abort, g, redirect, render_template, request, send_file, session, url_for
 from .config import settings
 from . import auth
 from .store import create_job, get_job, init_db, list_jobs, public_job
@@ -32,6 +34,32 @@ def create_app() -> Flask:
     def require_user():
         if not g.identity.get('owner_id'):
             abort(401)
+
+    def owned_job(job_id):
+        require_user()
+        job = get_job(job_id)
+        if not job or job.get('owner_id') != g.identity['owner_id']:
+            abort(404)
+        return job
+
+    def downloaded_pdf(job):
+        summary = json.loads(job.get('summary') or '{}')
+        if not summary.get('pdf_downloaded'):
+            return None
+        # Older completed jobs recorded the path only in the final manifest.
+        filename = summary.get('pdf_filename') or Path(job['payload'].get('pdf_path', '')).name
+        if not filename or Path(filename).name != filename or Path(filename).suffix.lower() != '.pdf':
+            return None
+        try:
+            root = settings.work_dir.resolve()
+            directory = root / job['id']
+            path = directory / filename
+            # No directories outside this job, including symlinks to other jobs.
+            if directory.parent != root or path.resolve() != path or not path.is_file():
+                return None
+            return path
+        except (OSError, ValueError, RuntimeError):
+            return None
 
     def home(error=None):
         owner = g.identity.get('owner_id')
@@ -98,11 +126,17 @@ def create_app() -> Flask:
 
     @app.get('/jobs/<job_id>')
     def job_detail(job_id):
-        require_user()
-        job = get_job(job_id)
-        if not job or job.get('owner_id') != g.identity['owner_id']:
+        job = owned_job(job_id)
+        return render_template('job.html', job=public_job(job), identity=g.identity,
+                               pdf_available=downloaded_pdf(job) is not None)
+
+    @app.get('/jobs/<job_id>/pdf')
+    def job_pdf(job_id):
+        path = downloaded_pdf(owned_job(job_id))
+        if path is None:
             abort(404)
-        return render_template('job.html', job=public_job(job), identity=g.identity)
+        return send_file(path, mimetype='application/pdf', as_attachment=True,
+                         download_name=path.name, conditional=False, etag=False, max_age=0)
 
     @app.errorhandler(auth.AuthError)
     def auth_failure(error):
