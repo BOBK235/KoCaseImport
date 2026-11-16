@@ -179,4 +179,5 @@ def test_job_timeout_terminates_child_and_removes_partial_file(env, monkeypatch)
     monkeypatch.setattr(worker, '_bounded_job', slow)
     worker.run_isolated(store.claim_next_job())
     assert store.get_job(job_id)['status'] == 'failed'
+    assert store.public_job(store.get_job(job_id))['failure']['code'] == 'job_timeout'
     assert not (cfg.work_dir/job_id/'test.pdf.part').exists()

@@ -29,7 +29,7 @@ def download_budget(cfg):
         available = min(cfg.max_work_bytes - used,
                         shutil.disk_usage(cfg.work_dir).free - 64 * 1024 * 1024)
         if available <= 0:
-            raise ResourceLimit('PDF 보관 공간 한도에 도달했습니다. 잠시 후 다시 시도하세요.')
+            raise ResourceLimit('PDF 보관 공간 한도에 도달했습니다. 잠시 후 다시 시도하세요.', code='work_storage_full')
         yield min(cfg.max_pdf_bytes, available)
 
 
@@ -70,5 +70,5 @@ def write_manifest(cfg, job_dir, data):
         used = sum(p.stat().st_size for p in cfg.work_dir.rglob('*') if p.is_file() and not p.is_symlink())
         old_size = path.stat().st_size if path.is_file() else 0
         if used - old_size + len(encoded) > cfg.max_work_bytes:
-            raise ResourceLimit('작업 파일 보관 공간 한도를 초과했습니다.')
+            raise ResourceLimit('작업 파일 보관 공간 한도를 초과했습니다.', code='work_storage_full')
         path.write_bytes(encoded)

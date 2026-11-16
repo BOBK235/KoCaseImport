@@ -5,17 +5,20 @@ import re
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
-CASE_RE = re.compile(r"^(?P<year>\d{2,4})\s*(?P<type>헌[가나다라마바사아]|헌마|헌바|헌사|헌아)\s*(?P<num>\d+)(?P<etc>등)?$")
+CASE_RE = re.compile(r"^(?P<year>[0-9]{2}|[0-9]{4})\s*(?P<type>헌[가나다라마바사아]|헌마|헌바|헌사|헌아)\s*(?P<num>[0-9]+)(?P<etc>등)?$")
 
 
 def normalize_case_number(value: str) -> str:
     value = re.sub(r"[\s\-]", "", value.strip())
     m = CASE_RE.match(value)
     if not m:
-        raise ValueError("헌법재판소 사건번호 형식이 아닙니다. 예: 2016헌나1, 2024헌마123등")
+        raise ValueError("헌법재판소 사건번호 형식이 아닙니다. 예: 97헌가12, 2016헌나1, 2024헌마123등")
     year = m.group("year")
-    if len(year) == 2:
-        year = "19" + year if int(year) >= 80 else "20" + year
+    # Historical eventNo values keep two digits; retain modern-year shorthand.
+    if len(year) == 4 and year.startswith('19'):
+        year = year[2:]
+    elif len(year) == 2 and int(year) < 80:
+        year = '20' + year
     return f"{year}{m.group('type')}{m.group('num')}{m.group('etc') or ''}"
 
 

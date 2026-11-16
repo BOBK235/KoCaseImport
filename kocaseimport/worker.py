@@ -4,10 +4,16 @@ import time
 import logging
 import multiprocessing
 import resource
+import errno
+import requests
+
+from pypdf.errors import PdfReadError, FileNotDecryptedError
 
 from .pipeline import Pipeline
-from .auth import access_token, cleanup_auth, init_auth
-from .store import claim_next_job, update_job, init_db, cleanup_records, _connect
+from .auth import access_token, cleanup_auth, init_auth, AuthError
+from .store import claim_next_job, update_job, init_db, cleanup_records, _connect, get_job, fail_job, ResourceLimit
+from .errors import PublicJobError
+from .mediawiki import MediaWikiError
 from .config import settings
 from .resources import cleanup_files, remove_partial_files
 
@@ -17,7 +23,9 @@ def run_forever() -> None:
     init_auth()
     # Deployment uses one queue supervisor. A container restart interrupts its child.
     with _connect() as con:
-        con.execute("UPDATE jobs SET status='failed',step='failed' WHERE status='running'")
+        interrupted = [row['id'] for row in con.execute("SELECT id FROM jobs WHERE status='running'")]
+    for job_id in interrupted:
+        fail_job(job_id, 'worker_restarted')
     last_cleanup = 0
     while True:
         if time.monotonic() - last_cleanup >= 60:
@@ -53,7 +61,7 @@ def run_isolated(job):
             process.kill()
             process.join()
     if timed_out or process.exitcode != 0:
-        update_job(job['id'], status='failed', step='failed', error='자원 또는 실행 시간 한도로 작업이 중단되었습니다.')
+        fail_job(job['id'], 'job_timeout' if timed_out else 'worker_stopped')
     process.close()
     remove_partial_files(settings, job['id'])
 
@@ -71,12 +79,30 @@ def run_job(job):
         update_job(job["id"], status="done", step="complete", payload=manifest.to_dict())
     except Exception as e:
         logging.error("job=%s failed: %s", job["id"], type(e).__name__)
-        update_job(
-            job["id"],
-            status="failed",
-            step="failed",
-            error=f"{type(e).__name__}: 작업 실패 (운영자 확인 필요)",
-        )
+        if isinstance(e, PublicJobError):
+            fail_job(job['id'], e.code, **e.context)
+            return
+        if isinstance(e, AuthError):
+            code = 'auth_expired'
+        elif isinstance(e, ResourceLimit):
+            code = e.code
+        elif isinstance(e, MemoryError):
+            code = 'memory_limit'
+        elif isinstance(e, FileNotDecryptedError):
+            code = 'pdf_encrypted'
+        elif isinstance(e, PdfReadError):
+            code = 'pdf_invalid'
+        elif isinstance(e, requests.RequestException):
+            code = 'external_connection'
+        elif isinstance(e, OSError):
+            code = ('work_storage_full' if e.errno in {errno.ENOSPC, errno.EDQUOT} else
+                    'storage_permission' if e.errno in {errno.EACCES, errno.EPERM} else 'storage_error')
+        elif isinstance(e, MediaWikiError):
+            code = 'wiki_error'
+        else:
+            current = get_job(job['id']) or {}
+            code = 'transcription_failed' if current.get('step') == 'transcription' else 'unexpected'
+        fail_job(job['id'], code)
 
 
 if __name__ == "__main__":

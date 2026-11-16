@@ -24,7 +24,7 @@ class Settings:
     live_edits: bool = _bool("KOCASE_LIVE_EDITS", False)
     user_agent: str = os.getenv(
         "KOCASE_USER_AGENT",
-        "KoCaseImport/0.2.3 (https://ko.wikisource.org/)"
+        "KoCaseImport/0.2.4 (https://ko.wikisource.org/)"
     )
 
     ccourt_service_key: str = os.getenv("CCOURT_SERVICE_KEY", "")

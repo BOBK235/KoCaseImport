@@ -447,3 +447,51 @@ def test_success_labels_require_mediawiki_success_response(env, monkeypatch, tmp
     monkeypatch.setattr(client, 'post', lambda *a, **kw: {'upload': {'result': 'Continue'}})
     with pytest.raises(mediawiki.MediaWikiError):
         client.upload_file(path, 'test.pdf', 'description', 'comment')
+
+
+def test_failure_results_show_safe_reason_stage_and_keep_owner_isolation(env, monkeypatch):
+    from kocaseimport.ccourt import CCourtError
+    app, _, cfg = env
+    alice, bob = app.test_client(), app.test_client()
+    login(alice, 'alice'); login(bob, 'bob')
+    failures = [
+        (CCourtError('PRIVATE-TRACE', code='pdf_missing', missing_editions=['결정문'], hwp_editions=['결정문']), 'case_lookup', '공식 PDF 미제공'),
+        (CCourtError('PRIVATE-TRACE', code='pdf_http', http_status=503), 'download_pdf', 'HTTP 상태: 503'),
+        (CCourtError('PRIVATE-TRACE', code='pdf_timeout'), 'download_pdf', 'PDF 다운로드 시간 초과'),
+        (RuntimeError('PRIVATE-TRACE https://secret/?serviceKey=PRIVATE-KEY'), 'verify_pdf', '예상하지 못한 처리 오류'),
+    ]
+    for exc, phase, expected in failures:
+        job_id = enqueue(alice, case_number='97헌가12')
+        assert store.get_job(job_id)['case_number'] == '97헌가12'
+        class FailingPipeline:
+            def __init__(self, job_id, token_provider): self.job_id = job_id
+            def run(self, *args, **kw):
+                store.update_job(self.job_id, step=phase)
+                store.update_summary(self.job_id, case_confirmed=True)
+                raise exc
+        monkeypatch.setattr(worker, 'Pipeline', FailingPipeline)
+        worker.run_job(store.claim_next_job())
+        result = alice.get('/jobs/'+job_id, base_url=BASE)
+        assert expected in result.text and '중단 단계:' in result.text
+        assert 'PRIVATE-TRACE' not in result.text and 'PRIVATE-KEY' not in result.text
+        assert str(cfg.work_dir) not in result.text
+        assert bob.get('/jobs/'+job_id, base_url=BASE).status_code == 404
+        assert app.test_client().get('/jobs/'+job_id, base_url=BASE).status_code == 401
+        if phase == 'download_pdf':
+            assert '중단 단계: PDF 다운로드' in result.text
+            assert '공식 PDF 미제공' not in result.text
+
+
+def test_corrupt_download_reports_pdf_validation_failure(env, monkeypatch):
+    from kocaseimport.models import CaseMetadata
+    app, _, _ = env
+    alice = app.test_client(); login(alice, 'alice')
+    job = enqueue(alice)
+    court = Mock()
+    court.lookup.return_value = CaseMetadata('2016헌나1')
+    court.download_pdf.side_effect = lambda meta, path: path.write_bytes(b'%PDF-corrupt')
+    monkeypatch.setattr(pipeline, 'CCourtClient', lambda **kw: court)
+    worker.run_job(store.claim_next_job())
+    page = alice.get('/jobs/'+job, base_url=BASE)
+    assert 'PDF 읽기 실패' in page.text and '중단 단계: PDF 파일·쪽수 검증' in page.text
+    assert '공식 PDF 미제공' not in page.text

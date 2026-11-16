@@ -5,6 +5,13 @@ from kocaseimport.wikisource import WikisourceBuilder
 def test_case_number():
     assert normalize_case_number("2016 헌나 1") == "2016헌나1"
     assert normalize_case_number("24헌마123등") == "2024헌마123등"
+    assert normalize_case_number('97헌가12') == '97헌가12'
+    assert normalize_case_number('97 헌가 12') == '97헌가12'
+    assert normalize_case_number('1997헌가12') == '97헌가12'
+    assert normalize_case_number('99헌바1등') == '99헌바1등'
+    import pytest
+    with pytest.raises(ValueError):
+        normalize_case_number('997헌가12')
 
 
 def test_filename():

@@ -11,6 +11,7 @@ from typing import Any
 
 from .config import settings
 from .utils import wiki_page_url
+from .errors import failure_record, describe_failure
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -38,9 +39,10 @@ CREATE INDEX IF NOT EXISTS admissions_time_idx ON admissions(created_at);
 
 
 class ResourceLimit(RuntimeError):
-    def __init__(self, message, retry_after=60):
+    def __init__(self, message, retry_after=60, *, code='resource_limit'):
         super().__init__(message)
         self.retry_after = max(1, int(retry_after))
+        self.code = code
 
 
 def _reserve_admission(con, job_id, owner_id, kind, now):
@@ -247,10 +249,24 @@ def update_summary(job_id: str, **fields) -> None:
                     (json.dumps(data, ensure_ascii=False), time.time(), job_id))
 
 
+def fail_job(job_id: str, code: str, **context) -> None:
+    """Keep the last processing stage and safe reason atomically with failure."""
+    with _connect() as con:
+        con.execute('BEGIN IMMEDIATE')
+        row = con.execute('SELECT step,summary FROM jobs WHERE id=?', (job_id,)).fetchone()
+        if not row:
+            return
+        data = json.loads(row['summary'] or '{}')
+        data['failure'] = failure_record(code, row['step'], **context)
+        con.execute("UPDATE jobs SET status='failed',step='failed',error=?,summary=?,updated_at=? WHERE id=?",
+                    (data['failure']['code'], json.dumps(data, ensure_ascii=False), time.time(), job_id))
+
+
 def public_job(job: dict) -> dict:
     """Explicit display allowlist. Never pass raw jobs to templates."""
     data = json.loads(job.get("summary") or "{}")
     status = job["status"]
+    failure = describe_failure(data.get('failure') or {'code': 'legacy_failure'}) if status == 'failed' else None
     # Previous releases saved publication results only in completed manifests.
     payload = job.get('payload') or {}
     if isinstance(payload, str):
@@ -267,6 +283,14 @@ def public_job(job: dict) -> dict:
     elif status == "done":
         case += " · 작업 완료"
     pdf = "다운로드 완료" if data.get("pdf_downloaded") else ("완료되지 않음" if status == "failed" else "대기 중")
+    if not data.get('pdf_downloaded'):
+        if status == 'running':
+            pdf = {'case_lookup': 'PDF 주소 확인 중', 'download_pdf': '다운로드 중',
+                   'verify_pdf': 'PDF 검증 중'}.get(job['step'], '대기 중')
+        elif failure and failure['code'] in {'pdf_missing', 'pdf_alternatives_disabled'}:
+            pdf = 'PDF 제공 정보 없음'
+        elif failure and failure['code'] == 'pdf_lookup_incomplete':
+            pdf = 'PDF 제공 여부 확인 실패'
     if data.get('pdf_downloaded') and data.get('pdf_expired'):
         pdf += ' · 보관 기간 만료'
     return {"id": job["id"], "case_number": job["case_number"], "case_status": case,
@@ -277,4 +301,5 @@ def public_job(job: dict) -> dict:
             "commons_url": wiki_page_url(settings.commons_api, commons_title) if commons_title else '',
             "wikisource_status": '위키문헌 업로드 완료' if wikisource_title else ('처리 중' if commons_title and status == 'running' else waiting),
             "wikisource_url": wiki_page_url(settings.wikisource_api, wikisource_title) if wikisource_title else '',
+            "failure": failure,
             "refresh": status in {"pending", "running"}}

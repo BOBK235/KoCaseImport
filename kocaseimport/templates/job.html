@@ -3,6 +3,15 @@
 {% block content %}<h1>{{ job.case_number }}</h1>
 {% include 'quota.html' %}
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if job.failure %}
+<section class="error" role="alert">
+<h2>{{ job.failure.title }}</h2>
+<p>중단 단계: {{ job.failure.stage }}</p>
+<p>{{ job.failure.message }}</p>
+{% if job.failure.details %}<ul>{% for detail in job.failure.details %}<li>{{ detail }}</li>{% endfor %}</ul>{% endif %}
+<p>{{ job.failure.action }}</p>
+</section>
+{% endif %}
 <section><dl>
 <dt>사건 조회·확인</dt><dd>{{ job.case_status }}</dd>
 <dt>PDF 다운로드</dt><dd>{{ job.pdf_status }}{% if job.page_count %} · {{ job.page_count }}쪽{% endif %}{% if pdf_available %}<br><a href="{{ url_for('job_pdf', job_id=job.id) }}" download>검증용 PDF 내려받기</a>{% endif %}</dd>

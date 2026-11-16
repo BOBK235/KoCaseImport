@@ -6,11 +6,12 @@ from pypdf import PdfReader
 
 from .ccourt import CCourtClient
 from .config import settings
+from .errors import PublicJobError
 from .mediawiki import MediaWikiClient
 from .models import CaseMetadata, ImportManifest
 from .ocr import OCRClient
 from .store import append_log, update_job, update_summary
-from .utils import resolve_job_pdf, sanitize_filename, sha1_file, wiki_page_url
+from .utils import normalize_case_number, resolve_job_pdf, sanitize_filename, sha1_file, wiki_page_url
 from .wikisource import WikisourceBuilder
 
 
@@ -38,7 +39,7 @@ class Pipeline:
             prepared_manifest: dict | None = None) -> ImportManifest:
         settings.prepare()
         if live and not settings.live_edits:
-            raise RuntimeError("실제 게시가 비활성화되어 있습니다.")
+            raise PublicJobError("실제 게시가 비활성화되어 있습니다.", code='live_disabled')
         effective_live = bool(live and settings.live_edits)
         self.summary(dry_run=not effective_live)
         if self.job_id and effective_live and self.token_provider is None:
@@ -65,11 +66,12 @@ class Pipeline:
             pdf_path = job_dir / base_name
             self.step("download_pdf")
             self.ccourt.download_pdf(meta, pdf_path)
+            self.step('verify_pdf')
             sha1 = sha1_file(pdf_path)
             page_count = len(PdfReader(str(pdf_path)).pages)
             if not 0 < page_count <= settings.max_pdf_pages:
                 pdf_path.unlink(missing_ok=True)
-                raise RuntimeError('PDF는 1~500쪽만 처리할 수 있습니다.')
+                raise PublicJobError('PDF는 1~500쪽만 처리할 수 있습니다.', code='pdf_page_limit')
 
         edition = meta.raw.get("source_edition", "결정문")
         self.summary(case_confirmed=True, edition=edition)
@@ -151,22 +153,24 @@ class Pipeline:
     def _load_prepared(self, case_number: str, data: dict):
         """Use only the verified dry-run bytes; never silently fetch a new edition."""
         meta = CaseMetadata(**data['case'])
-        if meta.case_number != case_number:
-            raise RuntimeError("저장된 사건번호가 작업과 일치하지 않습니다.")
+        if normalize_case_number(meta.case_number) != normalize_case_number(case_number):
+            raise PublicJobError("저장된 사건번호가 작업과 일치하지 않습니다.", code='case_mismatch')
+        meta.case_number = normalize_case_number(meta.case_number)
         path = resolve_job_pdf(settings.work_dir, self.job_id or '', Path(data.get('pdf_path', '')).name)
         if path is None:
-            raise RuntimeError("확인했던 PDF가 없습니다. 새 Dry-run 작업이 필요합니다.")
+            raise PublicJobError("확인했던 PDF가 없습니다. 새 Dry-run 작업이 필요합니다.", code='cached_pdf_missing')
         if path.stat().st_size > settings.max_pdf_bytes:
-            raise RuntimeError('PDF 크기 한도를 초과했습니다.')
+            raise PublicJobError('PDF 크기 한도를 초과했습니다.', code='pdf_size_limit')
         sha1 = sha1_file(path)
         if sha1 != data.get('pdf_sha1'):
-            raise RuntimeError("확인했던 PDF와 현재 파일이 다릅니다. 새 Dry-run 작업이 필요합니다.")
+            raise PublicJobError("확인했던 PDF와 현재 파일이 다릅니다. 새 Dry-run 작업이 필요합니다.", code='cached_pdf_changed')
         page_count = len(PdfReader(str(path)).pages)
         if not 0 < page_count <= settings.max_pdf_pages or page_count != data.get('page_count'):
-            raise RuntimeError("확인했던 PDF의 쪽수가 일치하지 않습니다.")
+            raise PublicJobError("확인했던 PDF의 쪽수가 일치하지 않습니다.", code='cached_pdf_changed')
         return meta, path, sha1, page_count
 
     def _save_manifest(self, job_dir: Path, manifest: ImportManifest) -> None:
+        self.step('save_result')
         from .resources import write_manifest
         write_manifest(settings, job_dir, manifest.to_dict())
 

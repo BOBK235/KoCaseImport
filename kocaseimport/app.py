@@ -118,7 +118,7 @@ def create_app() -> Flask:
         try:
             case_number = normalize_case_number(request.form.get('case_number', ''))
         except ValueError:
-            return home('사건번호를 확인해 주세요. 예: 2016헌나1'), 400
+            return home('사건번호를 확인해 주세요. 예: 97헌가12, 2016헌나1'), 400
         live = request.form.get('live') == '1'
         if live and not settings.live_edits:
             return home('현재는 Dry-run만 사용할 수 있습니다.'), 400
