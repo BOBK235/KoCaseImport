@@ -202,6 +202,13 @@ class CCourtClient:
             raise CCourtError("헌재 응답의 날짜 형식이 YYYYMMDD가 아니거나 유효하지 않습니다.") from None
 
     def download_pdf(self, meta: CaseMetadata, dest: Path) -> Path:
+        from .resources import download_budget
+        with download_budget(settings) as budget:
+            return self._download_pdf(meta, dest, budget)
+
+    def _download_pdf(self, meta: CaseMetadata, dest: Path, budget: int) -> Path:
+        import time
+        deadline = time.monotonic() + settings.download_seconds
         url = meta.pdf_url
         dest.parent.mkdir(parents=True, exist_ok=True)
         temporary = dest.with_suffix(dest.suffix + ".part")
@@ -217,9 +224,18 @@ class CCourtClient:
                         continue
                     if r.status_code != 200:
                         raise CCourtError(f"PDF 다운로드: HTTP {r.status_code}.")
+                    length = r.headers.get('Content-Length', '')
+                    if length.isdigit() and int(length) > budget:
+                        raise CCourtError('PDF 크기 또는 보관 공간 한도를 초과했습니다.')
+                    received = 0
                     with temporary.open("wb") as f:
-                        for chunk in r.iter_content(1024 * 1024):
+                        for chunk in r.iter_content(64 * 1024):
+                            if time.monotonic() > deadline:
+                                raise CCourtError('PDF 다운로드 시간 한도를 초과했습니다.')
                             if chunk:
+                                received += len(chunk)
+                                if received > budget:
+                                    raise CCourtError('PDF 크기 또는 보관 공간 한도를 초과했습니다.')
                                 f.write(chunk)
                 with temporary.open("rb") as f:
                     if f.read(5) != b"%PDF-":

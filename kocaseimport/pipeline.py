@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -26,6 +25,7 @@ class Pipeline:
             update_summary(self.job_id, **fields)
 
     def log(self, msg: str) -> None:
+        msg = str(msg)[:4000]
         print(msg, flush=True)
         if self.job_id:
             append_log(self.job_id, msg)
@@ -67,6 +67,9 @@ class Pipeline:
             self.ccourt.download_pdf(meta, pdf_path)
             sha1 = sha1_file(pdf_path)
             page_count = len(PdfReader(str(pdf_path)).pages)
+            if not 0 < page_count <= settings.max_pdf_pages:
+                pdf_path.unlink(missing_ok=True)
+                raise RuntimeError('PDF는 1~500쪽만 처리할 수 있습니다.')
 
         edition = meta.raw.get("source_edition", "결정문")
         self.summary(case_confirmed=True, edition=edition)
@@ -75,6 +78,10 @@ class Pipeline:
             self.log(f"조회 알림: {warning}")
         self.summary(pdf_downloaded=True, page_count=page_count, pdf_filename=base_name)
         self.log(f"PDF 다운로드: {page_count}쪽 / SHA1 {sha1}")
+
+        # The full API response is not needed to resume publishing. Avoid
+        # duplicating long decision text in both SQLite and manifest.json.
+        meta.raw = {'source_edition': edition}
 
         manifest = ImportManifest(
             case=meta,
@@ -149,18 +156,19 @@ class Pipeline:
         path = resolve_job_pdf(settings.work_dir, self.job_id or '', Path(data.get('pdf_path', '')).name)
         if path is None:
             raise RuntimeError("확인했던 PDF가 없습니다. 새 Dry-run 작업이 필요합니다.")
+        if path.stat().st_size > settings.max_pdf_bytes:
+            raise RuntimeError('PDF 크기 한도를 초과했습니다.')
         sha1 = sha1_file(path)
         if sha1 != data.get('pdf_sha1'):
             raise RuntimeError("확인했던 PDF와 현재 파일이 다릅니다. 새 Dry-run 작업이 필요합니다.")
         page_count = len(PdfReader(str(path)).pages)
-        if not page_count or page_count != data.get('page_count'):
+        if not 0 < page_count <= settings.max_pdf_pages or page_count != data.get('page_count'):
             raise RuntimeError("확인했던 PDF의 쪽수가 일치하지 않습니다.")
         return meta, path, sha1, page_count
 
     def _save_manifest(self, job_dir: Path, manifest: ImportManifest) -> None:
-        (job_dir / "manifest.json").write_text(
-            json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        from .resources import write_manifest
+        write_manifest(settings, job_dir, manifest.to_dict())
 
     @staticmethod
     def _commons_description(meta) -> str:

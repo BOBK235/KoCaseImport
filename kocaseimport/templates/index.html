@@ -1,6 +1,7 @@
 {% extends 'base.html' %}{% block content %}
 <h1>헌법재판소 결정문 가져오기</h1>
 <p>공식 원문을 확인하고, 내 Wikimedia 계정으로 Commons와 한국어 위키문헌에 가져옵니다.</p>
+{% include 'quota.html' %}
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 {% if not identity.owner_id %}
 <section><p>작업을 시작하려면 Wikimedia 계정으로 로그인해 주세요.</p><form method="post" action="{{ url_for('login') }}"><input type="hidden" name="csrf" value="{{ identity.csrf }}"><button type="submit">Wikimedia 계정으로 로그인</button></form></section>

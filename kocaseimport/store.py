@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 import uuid
@@ -26,7 +27,52 @@ CREATE TABLE IF NOT EXISTS jobs (
   updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS jobs_updated_idx ON jobs(status, updated_at);
+CREATE TABLE IF NOT EXISTS admissions (
+  job_id TEXT NOT NULL, owner_id TEXT NOT NULL, kind TEXT NOT NULL,
+  created_at REAL NOT NULL, PRIMARY KEY(job_id, kind)
+);
+CREATE INDEX IF NOT EXISTS admissions_owner_idx ON admissions(owner_id,kind,created_at);
+CREATE INDEX IF NOT EXISTS admissions_time_idx ON admissions(created_at);
 """
+
+
+class ResourceLimit(RuntimeError):
+    def __init__(self, message, retry_after=60):
+        super().__init__(message)
+        self.retry_after = max(1, int(retry_after))
+
+
+def _reserve_admission(con, job_id, owner_id, kind, now):
+    cutoff = now - settings.quota_window
+    count, oldest = con.execute(
+        'SELECT COUNT(*),MIN(created_at) FROM admissions WHERE owner_id=? AND kind=? AND created_at>?',
+        (owner_id, kind, cutoff),
+    ).fetchone()
+    if count >= settings.quota_limit:
+        label = '실제 게시' if kind == 'publish' else '사건 준비'
+        raise ResourceLimit(f'{label} limit 도달: 서버 시각 기준 최근 24시간에 100건을 접수했습니다. 추가 요청을 거부합니다.',
+                            math.ceil(oldest + settings.quota_window - now))
+    con.execute('INSERT INTO admissions(job_id,owner_id,kind,created_at) VALUES(?,?,?,?)',
+                (job_id, owner_id, kind, now))
+
+
+def _check_queue(con, owner_id):
+    if con.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('pending','running')").fetchone()[0] >= settings.max_active_jobs:
+        raise ResourceLimit('서버의 작업 대기 한도에 도달했습니다. 잠시 후 다시 시도하세요.')
+    if con.execute("SELECT COUNT(*) FROM jobs WHERE owner_id=? AND status IN ('pending','running')", (owner_id,)).fetchone()[0] >= settings.max_user_active_jobs:
+        raise ResourceLimit('동시에 대기·실행할 수 있는 작업은 3건입니다. 기존 작업 완료 후 다시 시도하세요.')
+
+
+def quota_status(owner_id):
+    now = time.time()
+    with _connect() as con:
+        rows = con.execute('SELECT kind,COUNT(*),MIN(created_at) FROM admissions WHERE owner_id=? AND created_at>? GROUP BY kind',
+                           (owner_id, now-settings.quota_window)).fetchall()
+    counts = {row[0]: row[1] for row in rows}
+    used = max(counts.values(), default=0)
+    return {'prepare': counts.get('prepare', 0), 'publish': counts.get('publish', 0),
+            'warning': used >= settings.quota_warn, 'reached': used >= settings.quota_limit}
 
 
 @contextmanager
@@ -35,6 +81,8 @@ def _connect():
     con = sqlite3.connect(settings.db_path, timeout=60)
     con.row_factory = sqlite3.Row
     try:
+        page_size = con.execute('PRAGMA page_size').fetchone()[0]
+        con.execute(f'PRAGMA max_page_count={settings.max_db_bytes // page_size}')
         with con:
             yield con
     finally:
@@ -43,6 +91,7 @@ def _connect():
 
 def init_db() -> None:
     with _connect() as con:
+        migrating_quota = not con.execute("SELECT 1 FROM sqlite_master WHERE name='admissions'").fetchone()
         con.executescript(SCHEMA)
         con.execute("BEGIN IMMEDIATE")
         columns = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
@@ -54,15 +103,26 @@ def init_db() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS jobs_owner_idx ON jobs(owner_id, created_at)")
         # Legacy jobs have no authenticated owner; never expose or execute them.
         con.execute("UPDATE jobs SET status='failed', step='failed' WHERE owner_id IS NULL AND status='pending'")
+        # Account for recent work accepted before the quota upgrade.
+        if migrating_quota:
+            cutoff = time.time() - settings.quota_window
+            con.execute("INSERT OR IGNORE INTO admissions SELECT id,owner_id,'prepare',created_at FROM jobs WHERE owner_id IS NOT NULL AND created_at>?", (cutoff,))
+            con.execute("INSERT OR IGNORE INTO admissions SELECT id,owner_id,'publish',updated_at FROM jobs WHERE owner_id IS NOT NULL AND live=1 AND updated_at>?", (cutoff,))
 
 
 def create_job(case_number: str, live: bool, pdf_url_override: str = "", *, owner_id: str, auth_id: str) -> str:
     if not owner_id or not auth_id:
         raise ValueError("인증된 작업 소유자가 필요합니다.")
-    init_db()
     job_id = uuid.uuid4().hex[:12]
-    now = time.time()
     with _connect() as con:
+        con.execute('BEGIN IMMEDIATE')
+        now = time.time()
+        _check_queue(con, owner_id)
+        if con.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] >= settings.max_job_records:
+            raise ResourceLimit('서버의 작업 보관 한도에 도달했습니다. 잠시 후 다시 시도하세요.')
+        _reserve_admission(con, job_id, owner_id, 'prepare', now)
+        if live:
+            _reserve_admission(con, job_id, owner_id, 'publish', now)
         con.execute(
             "INSERT INTO jobs(id,case_number,status,step,live,pdf_url_override,created_at,updated_at,owner_id,auth_id,summary) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (job_id, case_number, "pending", "queued", int(live), pdf_url_override, now, now, owner_id, auth_id, json.dumps({"dry_run": not live})),
@@ -85,9 +145,11 @@ def queue_publication(job_id: str, *, owner_id: str, auth_id: str) -> bool:
             return False
         summary = json.loads(row['summary'] or '{}')
         payload = json.loads(row['payload'] or '{}')
-        if not summary.get('pdf_downloaded') or not all(
+        if not summary.get('pdf_downloaded') or summary.get('pdf_expired') or not all(
                 payload.get(k) for k in ('case', 'pdf_path', 'pdf_sha1', 'page_count')):
             return False
+        _check_queue(con, owner_id)
+        _reserve_admission(con, job_id, owner_id, 'publish', time.time())
         summary['dry_run'] = False
         con.execute(
             "UPDATE jobs SET live=1,reuse_pdf=1,status='pending',step='queued',auth_id=?,"
@@ -117,7 +179,6 @@ def list_jobs(owner_id: str, limit: int = 30) -> list[dict[str, Any]]:
 
 
 def claim_next_job() -> dict[str, Any] | None:
-    init_db()
     with _connect() as con:
         con.execute("BEGIN IMMEDIATE")
         row = con.execute(
@@ -135,6 +196,15 @@ def claim_next_job() -> dict[str, Any] | None:
     return get_job(row["id"])
 
 
+def cleanup_records():
+    with _connect() as con:
+        now = time.time()
+        con.execute('DELETE FROM admissions WHERE rowid IN (SELECT rowid FROM admissions WHERE created_at<=? LIMIT 500)',
+                    (now-settings.quota_window,))
+        con.execute("DELETE FROM jobs WHERE id IN (SELECT id FROM jobs WHERE status IN ('done','failed') AND updated_at<=? LIMIT 100)",
+                    (now-settings.job_retention,))
+
+
 def update_job(job_id: str, **fields: Any) -> None:
     allowed = {"status", "step", "payload", "log", "error"}
     values = []
@@ -144,6 +214,8 @@ def update_job(job_id: str, **fields: Any) -> None:
             continue
         if key == "payload" and not isinstance(value, str):
             value = json.dumps(value, ensure_ascii=False)
+        if key == 'payload' and len(value.encode('utf-8')) > settings.max_manifest_bytes:
+            raise ResourceLimit('작업 결과 보관 크기 한도를 초과했습니다.')
         sets.append(f"{key}=?")
         values.append(value)
     sets.append("updated_at=?")
@@ -157,7 +229,7 @@ def append_log(job_id: str, message: str) -> None:
     with _connect() as con:
         row = con.execute("SELECT log FROM jobs WHERE id=?", (job_id,)).fetchone()
         old = row[0] if row else ""
-        text = (old + ("\n" if old else "") + message)[-120000:]
+        text = (old + ("\n" if old else "") + message)[-16000:]
         con.execute("UPDATE jobs SET log=?,updated_at=? WHERE id=?", (text, time.time(), job_id))
 
 
@@ -195,6 +267,8 @@ def public_job(job: dict) -> dict:
     elif status == "done":
         case += " · 작업 완료"
     pdf = "다운로드 완료" if data.get("pdf_downloaded") else ("완료되지 않음" if status == "failed" else "대기 중")
+    if data.get('pdf_downloaded') and data.get('pdf_expired'):
+        pdf += ' · 보관 기간 만료'
     return {"id": job["id"], "case_number": job["case_number"], "case_status": case,
             "pdf_status": pdf, "page_count": data.get("page_count"),
             "edition": data.get("edition") or "확인 전",

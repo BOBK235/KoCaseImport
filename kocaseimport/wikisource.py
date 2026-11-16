@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from html import escape
 from typing import Any
 
 from .config import settings
@@ -91,9 +92,31 @@ class WikisourceBuilder:
         title = meta.case_number
         if self.client.page_exists(title) and not settings.overwrite:
             return title
+        def value(text):
+            text = escape(' '.join(str(text).split()), quote=True)
+            for char in '|{}[]':
+                text = text.replace(char, f'&#{ord(char)};')
+            return text
+
+        year = meta.decision_date[:4] if re.match(r'^\d{4}-\d{2}-\d{2}$', meta.decision_date) else ''
+        description = (f'{meta.decision_date} 선고. ' if meta.decision_date else '')
+        description += '원문 판본: ' + meta.raw.get('source_edition', '결정문') + '.'
         text = (
-            f"<pages index=\"{filename}\" from=\"1\" to=\"{page_count}\" />\n"
-            f"\n<!-- 원문: {meta.source_page_url} -->\n"
+            '{{머리말\n'
+            f'| 제목 = {value(meta.case_number)}\n'
+            '| 다른 표기 =\n'
+            f'| 부제 = {value(meta.case_name)}\n'
+            '| 부제 다른 표기 =\n'
+            f'| 저자 = {value(meta.court)}\n'
+            '| 역자 =\n| 이전 =\n| 다음 =\n'
+            f'| 연도 = {year}\n'
+            f'| 설명 = {value(description)}\n'
+            '| 분류없음 = true\n'
+            '}}\n\n'
+            f'<pages index="{escape(filename, quote=True)}" from="1" to="{page_count}" />\n'
+            f'\n<!-- 원문: {escape(meta.source_page_url, quote=True)} -->\n'
+            '\n== 라이선스 ==\n{{PD-South Korea-exempt}}\n\n'
+            '[[분류:대한민국 헌법재판소 판례]]\n'
         )
         self.client.edit_page(
             title,

@@ -10,7 +10,7 @@ import pytest
 import requests
 from cryptography.fernet import Fernet
 
-from kocaseimport import auth, app as web, store, pipeline, mediawiki, worker, wikisource
+from kocaseimport import auth, app as web, store, pipeline, mediawiki, worker, wikisource, ccourt
 from kocaseimport.config import settings
 
 BASE = 'https://tool.example'
@@ -23,7 +23,7 @@ def env(tmp_path, monkeypatch):
                   oauth_client_id='client', oauth_client_secret='client-secret',
                   oauth_redirect_uri=BASE+'/oauth/callback', live_edits=False,
                   mw_bearer_token='SHARED-TOKEN-MUST-NOT-BE-USED')
-    for module in (auth, web, store, pipeline, mediawiki, wikisource):
+    for module in (auth, web, store, pipeline, mediawiki, wikisource, worker, ccourt):
         monkeypatch.setattr(module, 'settings', cfg)
     app = web.create_app()
     app.testing = True

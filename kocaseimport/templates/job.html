@@ -1,6 +1,7 @@
 {% extends 'base.html' %}{% block title %}{{ job.case_number }} · KoCaseImport{% endblock %}
 {% block refresh %}{% if job.refresh %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
 {% block content %}<h1>{{ job.case_number }}</h1>
+{% include 'quota.html' %}
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
 <section><dl>
 <dt>사건 조회·확인</dt><dd>{{ job.case_status }}</dd>

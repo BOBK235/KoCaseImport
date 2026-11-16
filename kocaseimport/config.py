@@ -24,7 +24,7 @@ class Settings:
     live_edits: bool = _bool("KOCASE_LIVE_EDITS", False)
     user_agent: str = os.getenv(
         "KOCASE_USER_AGENT",
-        "KoCaseImport/0.2.2 (https://ko.wikisource.org/)"
+        "KoCaseImport/0.2.3 (https://ko.wikisource.org/)"
     )
 
     ccourt_service_key: str = os.getenv("CCOURT_SERVICE_KEY", "")
@@ -52,6 +52,26 @@ class Settings:
     overwrite: bool = _bool("KOCASE_OVERWRITE", False)
     edit_delay: float = float(os.getenv("KOCASE_EDIT_DELAY", "0.6"))
     commons_category: str = os.getenv("KOCASE_COMMONS_CATEGORY", "").strip()
+
+    # Admission counts are per authenticated central Wikimedia user.
+    quota_window: int = 24 * 3600
+    quota_warn: int = 80
+    quota_limit: int = 100
+    max_user_active_jobs: int = 3
+    max_active_jobs: int = 100
+    max_job_records: int = 2000
+    max_db_bytes: int = 256 * 1024 * 1024
+    max_manifest_bytes: int = 512 * 1024
+    max_auth_records: int = 5000
+    max_user_sessions: int = 10
+    max_pdf_bytes: int = 50 * 1024 * 1024
+    max_work_bytes: int = 1024 * 1024 * 1024
+    max_pdf_pages: int = 500
+    pdf_retention: int = 24 * 3600
+    job_retention: int = 7 * 24 * 3600
+    download_seconds: int = 120
+    job_timeout: int = 30 * 60
+    job_memory_bytes: int = 256 * 1024 * 1024
 
     def prepare(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

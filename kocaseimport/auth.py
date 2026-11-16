@@ -48,7 +48,16 @@ def init_auth():
             auth_id TEXT, pending_state TEXT, pending_verifier TEXT, pending_at REAL,
             expires REAL NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON web_sessions(expires);
+        CREATE INDEX IF NOT EXISTS sessions_owner_idx ON web_sessions(owner_id);
+        CREATE INDEX IF NOT EXISTS grants_expiry_idx ON oauth_grants(expires);
+        CREATE INDEX IF NOT EXISTS grants_owner_idx ON oauth_grants(owner_id);
         ''')
+        con.execute('BEGIN IMMEDIATE')
+        columns = {row[1] for row in con.execute('PRAGMA table_info(oauth_grants)')}
+        if 'login_state' not in columns:
+            con.execute('ALTER TABLE oauth_grants ADD COLUMN login_state TEXT')
+        con.execute('CREATE UNIQUE INDEX IF NOT EXISTS grants_state_idx ON oauth_grants(login_state)')
     # Files are private even though stored tokens are encrypted.
     settings.db_path.chmod(0o600)
 
@@ -69,21 +78,31 @@ def _decrypt(blob):
 
 
 def new_session(owner_id=None, username=None, auth_id=None):
+    if not owner_id or not auth_id:
+        raise AuthError('익명 서버 세션은 생성하지 않습니다.')
     sid = secrets.token_urlsafe(32)
     with _connect() as con:
+        con.execute('BEGIN IMMEDIATE')
         now = time.time()
-        con.execute("DELETE FROM web_sessions WHERE expires<?", (now,))
-        con.execute("DELETE FROM oauth_grants WHERE expires<?", (now,))
+        _check_session_capacity(con, owner_id)
         con.execute("INSERT INTO web_sessions(id,csrf,owner_id,username,auth_id,expires) VALUES(?,?,?,?,?,?)",
                     (_hash(sid), secrets.token_urlsafe(32), owner_id, username, auth_id, now + SESSION_TTL))
     return sid
 
 
+def _check_session_capacity(con, owner_id):
+    if (con.execute('SELECT COUNT(*) FROM web_sessions').fetchone()[0] >= settings.max_auth_records
+            or con.execute('SELECT COUNT(*) FROM oauth_grants').fetchone()[0] >= settings.max_auth_records
+            or con.execute('SELECT COUNT(*) FROM oauth_grants WHERE owner_id=?', (owner_id,)).fetchone()[0] >= settings.max_user_sessions
+            or con.execute('SELECT COUNT(*) FROM web_sessions WHERE owner_id=?', (owner_id,)).fetchone()[0] >= settings.max_user_sessions):
+        raise AuthError('로그인 세션 한도에 도달했습니다. 잠시 후 다시 시도하세요.')
+
+
 def get_session(sid):
-    if not isinstance(sid, str) or not sid:
+    if not isinstance(sid, str) or not sid or len(sid) > 128:
         return None
     with _connect() as con:
-        row = con.execute("SELECT * FROM web_sessions WHERE id=? AND expires>?", (_hash(sid), time.time())).fetchone()
+        row = con.execute("SELECT * FROM web_sessions WHERE id=? AND owner_id IS NOT NULL AND expires>?", (_hash(sid), time.time())).fetchone()
     return dict(row) if row else None
 
 
@@ -91,7 +110,10 @@ def delete_session(sid, disconnect=False):
     with _connect() as con:
         row = con.execute("SELECT auth_id FROM web_sessions WHERE id=?", (_hash(sid),)).fetchone()
         if row and disconnect and row['auth_id']:
-            con.execute("DELETE FROM oauth_grants WHERE id=?", (row['auth_id'],))
+            # Revoke the token immediately but retain the consumed state until
+            # every pre-login cookie for this attempt is necessarily expired.
+            con.execute("UPDATE oauth_grants SET token='',expires=MIN(expires,?) WHERE id=?",
+                        (time.time()+600, row['auth_id']))
             con.execute("UPDATE jobs SET status='failed',step='failed' WHERE auth_id=? AND status='pending'", (row['auth_id'],))
         con.execute("DELETE FROM web_sessions WHERE id=?", (_hash(sid),))
 
@@ -103,16 +125,13 @@ def _client():
                          code_challenge_method='S256', default_timeout=30)
 
 
-def begin_login(sid):
+def begin_login():
     state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(64)
-    with _connect() as con:
-        updated = con.execute("UPDATE web_sessions SET pending_state=?,pending_verifier=?,pending_at=? WHERE id=? AND expires>?",
-                    (state, _encrypt(verifier), time.time(), _hash(sid), time.time())).rowcount
-    if not updated:
-        raise AuthError("로그인 화면을 새로 열어 주세요.")
+    # Encrypted, signed browser cookie only; no unauthenticated database writes.
+    pending = _encrypt({'state': state, 'verifier': verifier, 'created': time.time()})
     with _client() as client:
         url, _ = client.create_authorization_url(OAUTH_BASE + '/authorize', state=state, code_verifier=verifier)
-    return url
+    return url, pending
 
 
 def _valid_token(token):
@@ -123,21 +142,23 @@ def _valid_token(token):
     return token
 
 
-def complete_login(sid, state, code):
-    # Consume the state atomically, once, before exchanging the code.
+def complete_login(pending, state, code, previous_sid=None):
+    if not pending or not state or not code or len(state) > 256 or len(code) > 4096:
+        raise AuthError('로그인 요청이 없습니다.')
+    attempt = _decrypt(pending)
+    age = time.time() - attempt['created']
+    if not 0 <= age <= 600 or not hmac.compare_digest(state, attempt['state']):
+        raise AuthError('로그인 요청이 만료되었거나 일치하지 않습니다.')
+    state_hash = _hash(state)
+    # Invalid/replayed requests do not allocate rows. OAuth codes are single-use;
+    # a unique state index also closes concurrent callbacks with different codes.
     with _connect() as con:
-        con.execute('BEGIN IMMEDIATE')
-        row = con.execute("SELECT * FROM web_sessions WHERE id=? AND expires>?", (_hash(sid), time.time())).fetchone()
-        if (not row or not state or not row['pending_state']
-            or not hmac.compare_digest(state, row['pending_state'])
-            or time.time() - row['pending_at'] > 600 or not code):
-            raise AuthError("로그인 요청이 만료되었거나 일치하지 않습니다. 다시 시도하세요.")
-        verifier = _decrypt(row['pending_verifier'])
-        con.execute("UPDATE web_sessions SET pending_state=NULL,pending_verifier=NULL,pending_at=NULL WHERE id=?", (_hash(sid),))
+        if con.execute('SELECT 1 FROM oauth_grants WHERE login_state=?', (state_hash,)).fetchone():
+            raise AuthError('이미 사용된 로그인 요청입니다.')
     try:
         with _client() as client:
             token = _valid_token(client.fetch_token(OAUTH_BASE + '/access_token',
-                grant_type='authorization_code', code=code, code_verifier=verifier,
+                grant_type='authorization_code', code=code, code_verifier=attempt['verifier'],
                 redirect_uri=settings.oauth_redirect_uri))
         with requests.get(OAUTH_BASE + '/resource/profile',
                 headers={'Authorization': 'Bearer ' + token['access_token'], 'User-Agent': settings.user_agent},
@@ -151,11 +172,29 @@ def complete_login(sid, state, code):
         # Do not log response bodies, codes, token endpoints or provider exceptions.
         raise AuthError("Wikimedia 로그인에 실패했습니다. 다시 시도하세요.") from None
     grant_id = secrets.token_hex(24)
+    sid = secrets.token_urlsafe(32)
     with _connect() as con:
-        con.execute("INSERT INTO oauth_grants VALUES(?,?,?,?,?)",
-                    (grant_id, uid, name, _encrypt(token), time.time() + SESSION_TTL))
-    delete_session(sid)
-    return new_session(uid, name, grant_id)
+        con.execute('BEGIN IMMEDIATE')
+        if con.execute('SELECT 1 FROM oauth_grants WHERE login_state=?', (state_hash,)).fetchone():
+            raise AuthError('이미 사용된 로그인 요청입니다.')
+        if previous_sid:
+            con.execute('DELETE FROM web_sessions WHERE id=?', (_hash(previous_sid),))
+        _check_session_capacity(con, uid)
+        expires = time.time() + SESSION_TTL
+        con.execute("INSERT INTO oauth_grants(id,owner_id,username,token,expires,login_state) VALUES(?,?,?,?,?,?)",
+                    (grant_id, uid, name, _encrypt(token), expires, state_hash))
+        con.execute("INSERT INTO web_sessions(id,csrf,owner_id,username,auth_id,expires) VALUES(?,?,?,?,?,?)",
+                    (_hash(sid), secrets.token_urlsafe(32), uid, name, grant_id, expires))
+    return sid
+
+
+def cleanup_auth():
+    """Worker maintenance only; indexed, bounded batches, never per request."""
+    with _connect() as con:
+        now = time.time()
+        con.execute('DELETE FROM web_sessions WHERE id IN (SELECT id FROM web_sessions WHERE expires<=? LIMIT 500)', (now,))
+        con.execute('DELETE FROM web_sessions WHERE id IN (SELECT id FROM web_sessions WHERE owner_id IS NULL LIMIT 500)')
+        con.execute('DELETE FROM oauth_grants WHERE id IN (SELECT id FROM oauth_grants WHERE expires<=? LIMIT 500)', (now,))
 
 
 def access_token(auth_id, owner_id):
