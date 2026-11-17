@@ -12,7 +12,8 @@ import pymysql
 
 
 class DatabaseUnavailable(RuntimeError):
-    def __init__(self):
+    def __init__(self, *, code=None):
+        self.code = code if isinstance(code, int) else None
         super().__init__('저장소를 사용할 수 없습니다. 작업을 새로 접수하지 않았으니 잠시 후 다시 확인해 주세요.')
 
 
@@ -108,6 +109,7 @@ class Connection:
         self.raw, self.cfg, self.active = raw, cfg, False
         self.verify = verify
         self.mysql = cfg.db_backend == 'mariadb'
+        self.app_budget = False
     def begin(self):
         if self.active:
             return
@@ -120,9 +122,10 @@ class Connection:
         else:
             self.raw.execute('BEGIN IMMEDIATE')
         self.active = True
-        if self.mysql and self.verify:
-            from .persistence import check_configuration
-            check_configuration(self, self.cfg)
+        if self.mysql:
+            from .persistence import check_configuration, metadata
+            meta = check_configuration(self, self.cfg) if self.verify else metadata(self)
+            self.app_budget = meta.get('schema_version') == '2'
     def execute(self, sql, params=()):
         if sql.strip().upper() == 'BEGIN IMMEDIATE':
             self.begin()
@@ -131,6 +134,14 @@ class Connection:
             return self.raw.execute(sql, params)
         if sql.lstrip().split(None, 1)[0].upper() in {'INSERT', 'UPDATE', 'DELETE'}:
             self.begin()
+            if self.app_budget:
+                from .budget import mutate
+                result = mutate(self, sql, params)
+                if result is not None:
+                    return result
+        return self._execute(sql, params)
+
+    def _execute(self, sql, params=()):
         cursor = self.raw.cursor()
         # Application-owned SQL uses qmark placeholders, never literal '?'.
         cursor.execute(sql.replace('%', '%%').replace('?', '%s'), params)
@@ -139,6 +150,16 @@ class Connection:
         if not self.mysql:
             return self.raw.executemany(sql, rows)
         self.begin()
+        if self.app_budget:
+            result = None
+            count = 0
+            for params in rows:
+                result = self.execute(sql, params)
+                count += result.rowcount
+            if result is None:
+                return self._execute('SELECT 1 WHERE FALSE')
+            result.rowcount = count
+            return result
         cursor = self.raw.cursor()
         cursor.executemany(sql.replace('%', '%%').replace('?', '%s'), rows)
         return Result(cursor)
@@ -191,7 +212,7 @@ def connect(cfg, *, timeout=5, verify=True):
                 pass
         if 'KOCASE_DB_LIMIT' in str(e) or isinstance(e, sqlite3.Error) and getattr(e, 'sqlite_errorcode', 0) == sqlite3.SQLITE_FULL:
             raise DatabaseFull() from None
-        raise DatabaseUnavailable() from None
+        raise DatabaseUnavailable(code=e.args[0] if e.args else None) from None
     except BaseException:
         if raw:
             try:
@@ -222,8 +243,8 @@ def named_lock(cfg, purpose, *, timeout=2):
                     raise DatabaseUnavailable()
         yield check
         check()
-    except pymysql.MySQLError:
-        raise DatabaseUnavailable() from None
+    except pymysql.MySQLError as e:
+        raise DatabaseUnavailable(code=e.args[0] if e.args else None) from None
     finally:
         if raw:
             raw.close()  # Closing releases the advisory lock, never reconnect.

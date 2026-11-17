@@ -1,5 +1,6 @@
 """Operator commands; never exposed as web routes."""
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -17,8 +18,10 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     init = sub.add_parser('init')
     init.add_argument('--for-import', action='store_true')
+    init.add_argument('--resume', action='store_true', help='데이터가 없는 초기화 실패 DB만 이어서 초기화')
     sub.add_parser('import').add_argument('archive')
     sub.add_parser('check')
+    sub.add_parser('diagnose')
     for command in ('revoke-auth', 'rotate-auth-keys'):
         p = sub.add_parser(command)
         p.add_argument('--confirm', action='store_true', required=True)
@@ -29,8 +32,10 @@ def main():
         if settings.db_backend != 'mariadb':
             raise RuntimeError('이 명령은 영속 MariaDB 구성에서 실행하세요.')
         if args.command == 'init':
-            persistence.initialize(settings, ready=not args.for_import)
+            persistence.initialize(settings, ready=not args.for_import, resume=args.resume)
             print('비공개 DB 초기화 완료. '+('이전 파일을 import한 뒤 시작하세요.' if args.for_import else '이전 사용량 보호를 위해 24시간 후 새 요청을 접수합니다.'))
+        elif args.command == 'diagnose':
+            print(json.dumps(persistence.diagnose(settings), ensure_ascii=False, indent=2))
         elif args.command == 'import':
             migration.import_snapshot(settings, args.archive)
             print('DB·파일 이전 완료. 기존 세션 만료 시각과 사용량을 유지했습니다.')
@@ -47,7 +52,11 @@ def main():
     except (RuntimeError, ValueError, OSError, KeyError, TypeError, InvalidToken,
             tarfile.TarError, sqlite3.Error, database.pymysql.MySQLError) as e:
         # Driver errors may contain SQL and credentials. Never print their text.
-        print(str(e) if isinstance(e, RuntimeError) else '저장소 작업에 실패했습니다. 설정과 이전 파일을 확인하세요.', file=sys.stderr)
+        code = getattr(e, 'code', None)
+        if isinstance(e, database.pymysql.MySQLError):
+            code = e.args[0] if e.args and isinstance(e.args[0], int) else None
+        text = str(e) if isinstance(e, RuntimeError) else '저장소 작업에 실패했습니다. 설정과 이전 파일을 확인하세요.'
+        print(text + (f' [DB 코드: {code}]' if code else ''), file=sys.stderr)
         return 1
 
 
