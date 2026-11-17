@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import time
 from urllib.parse import urlsplit
@@ -12,6 +13,7 @@ from cryptography.fernet import Fernet
 import requests
 
 from .config import settings
+from . import audit
 from .store import _connect
 
 OAUTH_BASE = "https://meta.wikimedia.org/w/rest.php/oauth2"
@@ -23,6 +25,9 @@ class AuthError(RuntimeError):
 
 
 def validate_config():
+    audit.validate_config(settings)
+    if any(not re.fullmatch(r'[1-9][0-9]{0,19}', x) for x in settings.admin_user_ids):
+        raise RuntimeError('KOCASE_ADMIN_USER_IDS에는 Wikimedia 중앙 사용자 ID 숫자를 쉼표로 구분해 넣으세요.')
     if len(settings.secret_key) < 32 or settings.secret_key == 'dev-only-change-me':
         raise RuntimeError("KOCASE_SECRET_KEY에 32자 이상의 임의 문자열을 설정하세요.")
     if not settings.oauth_client_id or not settings.oauth_client_secret:
@@ -34,6 +39,11 @@ def validate_config():
         Fernet(settings.token_key.encode())
     except Exception:
         raise RuntimeError("KOCASE_TOKEN_KEY에 Fernet 키를 설정하세요.") from None
+
+
+def is_admin(identity, cfg):
+    # Only the authenticated OAuth subject and server configuration count.
+    return bool(identity and identity.get('owner_id') in cfg.admin_user_ids)
 
 
 def init_auth():

@@ -15,6 +15,7 @@ from .store import claim_next_job, update_job, init_db, cleanup_records, _connec
 from .errors import PublicJobError
 from .mediawiki import MediaWikiError
 from .config import settings
+from . import audit
 from .resources import cleanup_files, remove_partial_files
 
 
@@ -33,6 +34,7 @@ def run_forever() -> None:
                 cleanup_auth()
                 cleanup_files(settings)
                 cleanup_records()
+                audit.cleanup(settings)
             except Exception as e:
                 logging.error('maintenance failed: %s', type(e).__name__)
             last_cleanup = time.monotonic()

@@ -1,0 +1,9 @@
+{% extends 'base.html' %}{% block title %}조회 기록 삭제 확인 · KoCaseImport{% endblock %}
+{% block content %}<h1>조회 기록 삭제 확인</h1>
+<p>선택한 {{ jobs|length }}개 작업의 조회 기록과 이 서버에 보관한 PDF·결과 파일을 삭제합니다. 삭제한 Dry-run 작업은 이어서 게시할 수 없습니다.</p>
+<ul>{% for j in jobs %}<li>{{ j.case_number }} · {{ '실제 게시' if j.live else 'Dry-run' }} · 작업 {{ j.id }}</li>{% endfor %}</ul>
+<p>이미 공용·위키문헌에 게시한 파일과 문서는 유지됩니다. 관리자용 요청·삭제 기록은 최대 30일 보관하며, 최근 24시간 사용량도 유지됩니다.</p>
+<form method="post" action="{{ url_for('delete_history') }}"><input type="hidden" name="csrf" value="{{ identity.csrf }}">
+{% for j in jobs %}<input type="hidden" name="job_ids" value="{{ j.id }}">{% endfor %}
+<label><input type="checkbox" name="confirmed" value="yes" required> 위 내용을 확인했으며, 선택한 조회 기록과 서버 파일을 삭제합니다.</label>
+<button type="submit">확인한 기록과 파일 삭제</button> <a href="{{ url_for('index') }}">취소</a></form>{% endblock %}

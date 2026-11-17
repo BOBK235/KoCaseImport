@@ -3,10 +3,10 @@ import hmac
 import json
 import secrets
 from pathlib import Path
-from flask import Flask, abort, g, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, abort, flash, g, redirect, render_template, request, send_file, session, url_for
 from .config import settings
-from . import auth
-from .store import create_job, get_job, init_db, list_jobs, public_job, queue_publication, quota_status, ResourceLimit
+from . import auth, audit, history
+from .store import create_job, get_job, init_db, list_jobs, public_job, queue_publication, quota_status, ResourceLimit, admin_recent_jobs
 from .utils import normalize_case_number, resolve_job_pdf
 
 
@@ -35,6 +35,15 @@ def create_app() -> Flask:
     def require_user():
         if not g.identity.get('owner_id'):
             abort(401)
+
+    def require_admin():
+        require_user()
+        if not auth.is_admin(g.identity, settings):
+            abort(403)
+
+    @app.context_processor
+    def navigation():
+        return {'is_admin': auth.is_admin(getattr(g, 'identity', None), settings)}
 
     def owned_job(job_id):
         require_user()
@@ -116,6 +125,8 @@ def create_app() -> Flask:
         require_user()
         csrf()
         try:
+            if len(request.form.get('case_number', '')) > 40:
+                raise ValueError('case number too long')
             case_number = normalize_case_number(request.form.get('case_number', ''))
         except ValueError:
             return home('사건번호를 확인해 주세요. 예: 97헌가12, 2016헌나1'), 400
@@ -132,7 +143,8 @@ def create_app() -> Flask:
             abort(400)
         try:
             job_id = create_job(case_number, live=live, pdf_url_override=pdf_url,
-                               owner_id=g.identity['owner_id'], auth_id=g.identity['auth_id'])
+                               owner_id=g.identity['owner_id'], auth_id=g.identity['auth_id'],
+                               owner_name=g.identity['username'])
         except ResourceLimit as e:
             return home(str(e)), 429, {'Retry-After': str(e.retry_after)}
         return redirect(url_for('job_detail', job_id=job_id))
@@ -156,7 +168,8 @@ def create_app() -> Flask:
             return render_job(job, '확인했던 PDF가 남아 있지 않습니다. 새 작업으로 다시 확인해 주세요.', 400)
         auth.access_token(g.identity['auth_id'], g.identity['owner_id'])
         try:
-            queued = queue_publication(job_id, owner_id=g.identity['owner_id'], auth_id=g.identity['auth_id'])
+            queued = queue_publication(job_id, owner_id=g.identity['owner_id'], auth_id=g.identity['auth_id'],
+                                       owner_name=g.identity['username'])
         except ResourceLimit as e:
             html, status = render_job(job, str(e), 429)
             return html, status, {'Retry-After': str(e.retry_after)}
@@ -172,12 +185,68 @@ def create_app() -> Flask:
         return send_file(path, mimetype='application/pdf', as_attachment=True,
                          download_name=path.name, conditional=False, etag=False, max_age=0)
 
+    @app.post('/jobs/delete/confirm')
+    def confirm_delete():
+        require_user()
+        csrf()
+        rows = history.preview(request.form.getlist('job_ids'), g.identity['owner_id'])
+        return render_template('delete.html', jobs=rows, identity=g.identity)
+
+    @app.post('/jobs/delete')
+    def delete_history():
+        require_user()
+        csrf()
+        if request.form.get('confirmed') != 'yes':
+            abort(400)
+        count = history.delete_jobs(settings, request.form.getlist('job_ids'),
+                                    owner_id=g.identity['owner_id'], username=g.identity['username'])
+        flash(f'{count}개 작업의 조회 기록과 서버에 보관한 파일을 삭제했습니다.')
+        return redirect(url_for('index'))
+
+    @app.get('/account')
+    def account():
+        require_user()
+        return render_template('account.html', identity=g.identity)
+
+    @app.get('/admin/requests')
+    def admin_requests():
+        require_admin()
+        before = request.args.get('before', '')
+        actor_id = request.args.get('user_id', '').strip()
+        case_number = request.args.get('case_number', '').strip()
+        if before and (not before.isascii() or not before.isdecimal() or len(before) > 20):
+            abort(400)
+        if actor_id and (not actor_id.isascii() or not actor_id.isdecimal() or len(actor_id) > 20):
+            abort(400)
+        if case_number:
+            if len(case_number) > 40:
+                abort(400)
+            try:
+                case_number = normalize_case_number(case_number)
+            except ValueError:
+                abort(400)
+        audit.record(settings, 'admin_view', actor_id=g.identity['owner_id'], actor_name=g.identity['username'])
+        rows, older = audit.read_events(settings, before=int(before) if before else None,
+                                        actor_id=actor_id, case_number=case_number)
+        return render_template('admin.html', identity=g.identity, events=rows, older=older,
+                               actor_id=actor_id, case_number=case_number,
+                               current_jobs=admin_recent_jobs() if not before and not actor_id and not case_number else [])
+
+    @app.errorhandler(history.HistoryError)
+    def history_failure(error):
+        return render_template('error.html', message=str(error), identity=g.identity), error.status
+
+    @app.errorhandler(audit.AuditUnavailable)
+    def audit_failure(error):
+        return render_template('error.html', message=str(error), identity=g.identity), 503
+
     @app.errorhandler(auth.AuthError)
     def auth_failure(error):
         return render_template('error.html', message='로그인 상태를 확인하고 다시 시도해 주세요.'), 401
 
     @app.errorhandler(400)
     @app.errorhandler(401)
+    @app.errorhandler(403)
     @app.errorhandler(404)
     @app.errorhandler(413)
     @app.errorhandler(500)

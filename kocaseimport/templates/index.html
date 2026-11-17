@@ -13,9 +13,12 @@
 <details><summary>공식 PDF 주소 직접 지정</summary><label for="pdf">헌법재판소 PDF 주소</label><input id="pdf" name="pdf_url" type="url" placeholder="https://…ccourt.go.kr/…" maxlength="4096"></details>
 {% if live_enabled %}<label><input type="checkbox" name="live" value="1"> 내 계정으로 Commons 업로드 및 위키문헌 문서 생성을 실행합니다.</label>{% endif %}
 <p class="muted">{% if live_enabled %}선택하지 않으면 {% endif %}Dry-run으로 원문 확인과 PDF 다운로드만 진행합니다.</p><button type="submit">가져오기 시작</button>
+<p class="muted">운영자는 사용자명·고유 ID, 사건번호, 요청 종류·시각과 처리 결과를 확인할 수 있습니다. 요청 기록은 최대 30일 보관하며 보관 용량에 따라 더 일찍 삭제될 수 있습니다.</p>
 </form></section>
 <h2>자신의 최근 작업</h2>
-{% if jobs %}<div class="table-wrap"><table><thead><tr><th>사건</th><th>사건 조회</th><th>PDF 다운로드</th><th>원문 판본</th><th>Dry-run</th></tr></thead><tbody>
-{% for j in jobs %}<tr><td><a href="{{ url_for('job_detail',job_id=j.id) }}">{{ j.case_number }}</a></td><td>{{ j.case_status }}</td><td>{{ j.pdf_status }}{% if j.page_count %} · {{ j.page_count }}쪽{% endif %}</td><td>{{ j.edition }}</td><td>{{ '예' if j.dry_run else '아니요' }}</td></tr>{% endfor %}
-</tbody></table></div>{% else %}<p class="muted">아직 작업이 없습니다.</p>{% endif %}
+{% if jobs %}<form method="post" action="{{ url_for('confirm_delete') }}"><input type="hidden" name="csrf" value="{{ identity.csrf }}">
+<div class="table-wrap"><table><thead><tr><th>삭제 선택</th><th>사건</th><th>사건 조회</th><th>PDF 다운로드</th><th>원문 판본</th><th>Dry-run</th></tr></thead><tbody>
+{% for j in jobs %}<tr><td>{% if j.can_delete %}<input type="checkbox" name="job_ids" value="{{ j.id }}" aria-label="{{ j.case_number }} 작업 {{ j.id }} 삭제 선택">{% else %}<span class="muted">진행 중</span>{% endif %}</td><td><a href="{{ url_for('job_detail',job_id=j.id) }}">{{ j.case_number }}</a></td><td>{{ j.case_status }}</td><td>{{ j.pdf_status }}{% if j.page_count %} · {{ j.page_count }}쪽{% endif %}</td><td>{{ j.edition }}</td><td>{{ '예' if j.dry_run else '아니요' }}</td></tr>{% endfor %}
+</tbody></table></div><p><button type="submit">선택한 조회 기록 삭제…</button></p>
+<p class="muted">다음 화면에서 삭제 대상을 확인합니다. 삭제 후에도 최근 24시간 사용량과 관리자용 요청 기록은 정해진 보관 기간 동안 유지됩니다. 이미 공용·위키문헌에 게시한 자료는 삭제되지 않습니다.</p></form>{% else %}<p class="muted">아직 작업이 없습니다.</p>{% endif %}
 {% endif %}{% endblock %}

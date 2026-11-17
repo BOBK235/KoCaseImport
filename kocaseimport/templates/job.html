@@ -36,4 +36,5 @@
 {% endif %}
 </section>
 {% endif %}
+{% if job.can_delete %}<form method="post" action="{{ url_for('confirm_delete') }}"><input type="hidden" name="csrf" value="{{ identity.csrf }}"><input type="hidden" name="job_ids" value="{{ job.id }}"><button type="submit">이 조회 기록 삭제…</button></form>{% endif %}
 <a href="{{ url_for('index') }}">자신의 최근 작업으로 돌아가기</a>{% endblock %}

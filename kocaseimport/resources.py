@@ -11,10 +11,10 @@ from .store import _connect, ResourceLimit
 
 
 @contextmanager
-def storage_lock(cfg):
+def storage_lock(cfg, *, blocking=True):
     cfg.work_dir.mkdir(parents=True, exist_ok=True)
     with (cfg.work_dir / '.storage.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:

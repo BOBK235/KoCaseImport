@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import settings
+from . import audit
 from .utils import wiki_page_url
 from .errors import failure_record, describe_failure
 
@@ -78,11 +79,12 @@ def quota_status(owner_id):
 
 
 @contextmanager
-def _connect():
+def _connect(*, timeout=60):
     settings.prepare()
-    con = sqlite3.connect(settings.db_path, timeout=60)
+    con = sqlite3.connect(settings.db_path, timeout=timeout)
     con.row_factory = sqlite3.Row
     try:
+        con.execute('PRAGMA secure_delete=ON')
         page_size = con.execute('PRAGMA page_size').fetchone()[0]
         con.execute(f'PRAGMA max_page_count={settings.max_db_bytes // page_size}')
         with con:
@@ -112,7 +114,7 @@ def init_db() -> None:
             con.execute("INSERT OR IGNORE INTO admissions SELECT id,owner_id,'publish',updated_at FROM jobs WHERE owner_id IS NOT NULL AND live=1 AND updated_at>?", (cutoff,))
 
 
-def create_job(case_number: str, live: bool, pdf_url_override: str = "", *, owner_id: str, auth_id: str) -> str:
+def create_job(case_number: str, live: bool, pdf_url_override: str = "", *, owner_id: str, auth_id: str, owner_name: str = '') -> str:
     if not owner_id or not auth_id:
         raise ValueError("인증된 작업 소유자가 필요합니다.")
     job_id = uuid.uuid4().hex[:12]
@@ -129,10 +131,12 @@ def create_job(case_number: str, live: bool, pdf_url_override: str = "", *, owne
             "INSERT INTO jobs(id,case_number,status,step,live,pdf_url_override,created_at,updated_at,owner_id,auth_id,summary) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (job_id, case_number, "pending", "queued", int(live), pdf_url_override, now, now, owner_id, auth_id, json.dumps({"dry_run": not live})),
         )
+        audit.record(settings, 'job_requested', actor_id=owner_id, actor_name=owner_name,
+                     job={'id': job_id, 'case_number': case_number, 'live': live}, state='pending')
     return job_id
 
 
-def queue_publication(job_id: str, *, owner_id: str, auth_id: str) -> bool:
+def queue_publication(job_id: str, *, owner_id: str, auth_id: str, owner_name: str = '') -> bool:
     """Atomically promote one completed dry run; repeated submissions are no-ops."""
     if not owner_id or not auth_id:
         return False
@@ -158,6 +162,8 @@ def queue_publication(job_id: str, *, owner_id: str, auth_id: str) -> bool:
             "summary=?,error='',updated_at=? WHERE id=?",
             (auth_id, json.dumps(summary, ensure_ascii=False), time.time(), job_id),
         )
+        audit.record(settings, 'publication_requested', actor_id=owner_id, actor_name=owner_name,
+                     job={**dict(row), 'live': True}, state='pending')
     return True
 
 
@@ -225,6 +231,9 @@ def update_job(job_id: str, **fields: Any) -> None:
     values.append(job_id)
     with _connect() as con:
         con.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id=?", values)
+        row = con.execute('SELECT id,case_number,owner_id,live FROM jobs WHERE id=?', (job_id,)).fetchone() if fields.get('status') in {'done', 'failed'} else None
+    if row and row['owner_id']:
+        audit.try_record(settings, 'job_finished', actor_id=row['owner_id'], job=dict(row), state=fields['status'])
 
 
 def append_log(job_id: str, message: str) -> None:
@@ -253,13 +262,15 @@ def fail_job(job_id: str, code: str, **context) -> None:
     """Keep the last processing stage and safe reason atomically with failure."""
     with _connect() as con:
         con.execute('BEGIN IMMEDIATE')
-        row = con.execute('SELECT step,summary FROM jobs WHERE id=?', (job_id,)).fetchone()
+        row = con.execute('SELECT id,case_number,owner_id,live,step,summary FROM jobs WHERE id=?', (job_id,)).fetchone()
         if not row:
             return
         data = json.loads(row['summary'] or '{}')
         data['failure'] = failure_record(code, row['step'], **context)
         con.execute("UPDATE jobs SET status='failed',step='failed',error=?,summary=?,updated_at=? WHERE id=?",
                     (data['failure']['code'], json.dumps(data, ensure_ascii=False), time.time(), job_id))
+    if row['owner_id']:
+        audit.try_record(settings, 'job_finished', actor_id=row['owner_id'], job=dict(row), state='failed')
 
 
 def public_job(job: dict) -> dict:
@@ -302,4 +313,14 @@ def public_job(job: dict) -> dict:
             "wikisource_status": '위키문헌 업로드 완료' if wikisource_title else ('처리 중' if commons_title and status == 'running' else waiting),
             "wikisource_url": wiki_page_url(settings.wikisource_api, wikisource_title) if wikisource_title else '',
             "failure": failure,
-            "refresh": status in {"pending", "running"}}
+            "refresh": status in {"pending", "running"}, "can_delete": status in {'done', 'failed'}}
+
+
+def admin_recent_jobs(limit=100):
+    """Minimal legacy/current job snapshot; never expose payload, logs or grants."""
+    with _connect() as con:
+        rows = con.execute('''SELECT j.id,j.case_number,j.owner_id,j.created_at,j.status,j.live,
+                              COALESCE(g.username,'') AS username
+                              FROM jobs j LEFT JOIN oauth_grants g ON g.id=j.auth_id
+                              WHERE j.owner_id IS NOT NULL ORDER BY j.created_at DESC LIMIT ?''', (limit,)).fetchall()
+    return [dict(row) for row in rows]

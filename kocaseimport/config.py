@@ -24,7 +24,7 @@ class Settings:
     live_edits: bool = _bool("KOCASE_LIVE_EDITS", False)
     user_agent: str = os.getenv(
         "KOCASE_USER_AGENT",
-        "KoCaseImport/0.2.4 (https://ko.wikisource.org/)"
+        "KoCaseImport/0.2.5 (https://ko.wikisource.org/)"
     )
 
     ccourt_service_key: str = os.getenv("CCOURT_SERVICE_KEY", "")
@@ -36,6 +36,11 @@ class Settings:
     oauth_client_secret: str = os.getenv("MW_OAUTH_CLIENT_SECRET", "")
     oauth_redirect_uri: str = os.getenv("MW_OAUTH_REDIRECT_URI", "")
     token_key: str = os.getenv("KOCASE_TOKEN_KEY", "")
+    admin_user_ids: tuple[str, ...] = tuple(x.strip() for x in os.getenv("KOCASE_ADMIN_USER_IDS", "").split(',') if x.strip())
+    audit_dir: Path | None = Path(os.environ['KOCASE_AUDIT_DIR']) if os.getenv('KOCASE_AUDIT_DIR') else None
+    audit_retention: int = 30 * 24 * 3600
+    audit_file_bytes: int = 2 * 1024 * 1024
+    audit_file_count: int = 10
 
     mw_bot_username: str = os.getenv("MW_BOT_USERNAME", "")
     mw_bot_password: str = os.getenv("MW_BOT_PASSWORD", "")

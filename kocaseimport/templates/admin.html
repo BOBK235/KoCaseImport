@@ -1,0 +1,11 @@
+{% extends 'base.html' %}{% block title %}관리자 요청 기록 · KoCaseImport{% endblock %}
+{% block content %}<h1>관리자 요청 기록</h1>
+<p>최대 30일·20MiB 이내의 서버 요청 기록입니다. 삭제된 작업도 보관 기간 내 요청·삭제 기록만 남습니다. 시각은 UTC이며, 이 화면의 열람도 기록됩니다.</p>
+<form method="get" action="{{ url_for('admin_requests') }}"><label for="user-filter">Wikimedia 고유 ID (정확히 일치)</label><input id="user-filter" type="text" name="user_id" maxlength="20" value="{{ actor_id }}">
+<label for="case-filter">사건번호 (정확히 일치)</label><input id="case-filter" type="text" name="case_number" maxlength="40" value="{{ case_number }}"><p><button type="submit">조회</button> <a href="{{ url_for('admin_requests') }}">필터 해제</a></p></form>
+<div class="table-wrap"><table><thead><tr><th>시각 (UTC)</th><th>사용자 / 고유 ID</th><th>요청</th><th>사건 / 작업</th><th>모드 / 상태</th></tr></thead><tbody>
+{% for e in events %}<tr><td>{{ e.at }}</td><td>{{ e.actor_name or '이름 미기록' }}<br>{{ e.actor_id }}</td><td>{{ e.action }}</td><td>{{ e.case_number }}<br>{{ e.job_id }}</td><td>{{ {'dry_run':'Dry-run','live':'실제 게시'}.get(e.mode,'') }}<br>{{ {'pending':'대기','running':'실행 중','done':'완료','failed':'실패'}.get(e.state,'') }}</td></tr>{% else %}<tr><td colspan="5">해당하는 요청 기록이 없습니다.</td></tr>{% endfor %}
+</tbody></table></div>{% if older %}<p><a href="{{ url_for('admin_requests', before=older, user_id=actor_id, case_number=case_number) }}">이전 기록 100건</a></p>{% endif %}
+{% if current_jobs %}<h2>현재 보관 중인 최근 작업</h2><p class="muted">최대 100건입니다. 업데이트 전 작업도 포함하지만 당시의 요청 로그는 소급 생성하지 않습니다. 삭제된 작업은 이 목록에서도 사라집니다.</p>
+<div class="table-wrap"><table><thead><tr><th>사용자 / 고유 ID</th><th>사건 / 작업</th><th>모드 / 상태</th></tr></thead><tbody>{% for j in current_jobs %}<tr><td>{{ j.username or '이름 미기록' }}<br>{{ j.owner_id }}</td><td>{{ j.case_number }}<br>{{ j.id }}</td><td>{{ '실제 게시' if j.live else 'Dry-run' }}<br>{{ {'pending':'대기','running':'실행 중','done':'완료','failed':'실패'}.get(j.status,'') }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+{% endblock %}
