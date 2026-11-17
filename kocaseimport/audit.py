@@ -14,6 +14,7 @@ import re
 import stat
 import time
 import uuid
+from . import database
 
 
 class AuditUnavailable(RuntimeError):
@@ -29,26 +30,35 @@ LOG_NAME = re.compile(r'audit-[0-9]{8}-[0-9]{20}-[0-9a-f]{32}\.jsonl\Z')
 
 
 def directory(cfg):
-    return cfg.audit_dir or cfg.db_path.parent / 'audit'
+    return cfg.audit_dir or ((cfg.state_dir / 'audit') if cfg.db_backend == 'mariadb' and cfg.state_dir else cfg.db_path.parent / 'audit')
 
 
 def validate_config(cfg):
     path = directory(cfg)
     root = path.resolve()
+    if cfg.db_backend == 'mariadb' and (not cfg.state_dir or cfg.state_dir.resolve() not in root.parents):
+        raise RuntimeError('감사 로그는 KOCASE_STATE_DIR 아래 비공개 폴더여야 합니다.')
     forbidden = (cfg.work_dir.resolve(), (Path(__file__).parent / 'static').resolve())
     if (not path.is_absolute() or root == root.parent or 'public_html' in root.parts
-            or any(root == p or p in root.parents for p in forbidden)):
+            or any(root == p or p in root.parents or root in p.parents for p in forbidden)):
         raise RuntimeError('KOCASE_AUDIT_DIR는 작업 폴더·공개 웹 폴더 밖의 비공개 절대 경로여야 합니다.')
 
 
 @contextmanager
 def _locked(cfg):
     try:
+        if cfg.db_backend == 'mariadb':
+            from .persistence import verify_ready
+            verify_ready(cfg)
         root = directory(cfg)
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         if root.is_symlink() or not root.is_dir():
             raise OSError('invalid audit directory')
         root.chmod(0o700)
+        if cfg.db_backend == 'mariadb':
+            with database.named_lock(cfg, 'audit', timeout=2):
+                yield root
+            return
         fd = os.open(root / '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, 'a+b') as lock:
             os.fchmod(lock.fileno(), 0o600)
@@ -146,7 +156,7 @@ def try_record(cfg, action, **fields):
     """Completion logs must not relabel successful external edits as failed."""
     try:
         record(cfg, action, **fields)
-    except AuditUnavailable:
+    except (AuditUnavailable, database.DatabaseUnavailable):
         logging.error('audit completion unavailable; request audit retained')
 
 

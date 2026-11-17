@@ -4,7 +4,7 @@ import shutil
 import sqlite3
 import stat
 
-from . import audit
+from . import audit, database
 from .resources import storage_lock
 from .store import _connect
 
@@ -62,7 +62,7 @@ def delete_jobs(cfg, ids, *, owner_id, username):
         # another user's 120-second download in a web request.
         with storage_lock(cfg, blocking=False):
             with _connect(timeout=2) as con:
-                con.execute('BEGIN IMMEDIATE')
+                con.begin()
                 rows = _selection(con, ids, owner_id)
                 for row in rows:
                     audit.record(cfg, 'delete_requested', actor_id=owner_id, actor_name=username, job=row, state=row['status'])
@@ -78,7 +78,7 @@ def delete_jobs(cfg, ids, *, owner_id, username):
         # SQLite rolls back. Some artifacts may already be gone; a retry is
         # safe and can remove the remaining files and rows. Never claim success.
         raise HistoryError('파일 삭제를 완료하지 못했습니다. 기록은 유지되며 다시 삭제할 수 있습니다.', 503) from None
-    except sqlite3.DatabaseError:
+    except (sqlite3.DatabaseError, database.DatabaseUnavailable):
         raise HistoryError('기록 저장소를 사용할 수 없어 삭제를 완료하지 못했습니다. 목록을 새로 고친 뒤 다시 시도해 주세요.', 503) from None
     for row in rows:
         audit.try_record(cfg, 'job_deleted', actor_id=owner_id, actor_name=username, job=row, state=row['status'])

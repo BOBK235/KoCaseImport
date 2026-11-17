@@ -6,11 +6,12 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 from .config import settings
-from . import audit
+from . import audit, database
 from .utils import wiki_page_url
 from .errors import failure_record, describe_failure
 
@@ -46,7 +47,76 @@ class ResourceLimit(RuntimeError):
         self.code = code
 
 
+class LeaseLost(RuntimeError):
+    pass
+
+
+execution = ContextVar('execution', default=None)
+
+
+def _guard(con, job_id):
+    active = execution.get()
+    if active is None:
+        return
+    expected_job, holder = active
+    row = con.execute('SELECT status,worker_id FROM jobs WHERE id=?', (job_id,)).fetchone()
+    lease = con.execute("SELECT holder,expires FROM runtime_lease WHERE name='worker'").fetchone()
+    if (expected_job != job_id or not row or row['status'] != 'running' or row['worker_id'] != holder
+            or not lease or lease['holder'] != holder or lease['expires'] <= con.now()):
+        raise LeaseLost('작업 실행권이 만료되었습니다.')
+
+
+def assert_execution(job_id):
+    with _connect() as con:
+        _guard(con, job_id)
+
+
+def acquire_worker(holder):
+    interrupted = []
+    with _connect() as con:
+        con.begin()
+        now = con.now()
+        lease = con.execute("SELECT holder,expires FROM runtime_lease WHERE name='worker'").fetchone()
+        if lease and lease['holder'] != holder and lease['expires'] > now:
+            return False
+        if lease:
+            con.execute("UPDATE runtime_lease SET holder=?,expires=? WHERE name='worker'", (holder, now + settings.worker_lease_seconds))
+        else:
+            con.execute("INSERT INTO runtime_lease VALUES('worker',?,?)", (holder, now + settings.worker_lease_seconds))
+        # We own the sole worker lease. Interrupted jobs are never re-queued;
+        # an external upload may already have succeeded just before a crash.
+        for row in con.execute("SELECT id,case_number,owner_id,live,summary,step FROM jobs WHERE status='running'"):
+            data = json.loads(row['summary'] or '{}')
+            data['failure'] = failure_record('worker_restarted', row['step'])
+            con.execute("UPDATE jobs SET status='failed',step='failed',worker_id=NULL,error='worker_restarted',summary=?,updated_at=? WHERE id=?",
+                        (json.dumps(data, ensure_ascii=False), now, row['id']))
+            interrupted.append(dict(row))
+    for row in interrupted:
+        if row['owner_id']:
+            audit.try_record(settings, 'job_finished', actor_id=row['owner_id'], job=row, state='failed')
+    return True
+
+
+def renew_worker(holder):
+    with _connect() as con:
+        con.begin()
+        now = con.now()
+        return con.execute("UPDATE runtime_lease SET expires=? WHERE name='worker' AND holder=? AND expires>?",
+                           (now + settings.worker_lease_seconds, holder, now)).rowcount == 1
+
+
+def release_worker(holder):
+    with _connect() as con:
+        con.begin()
+        con.execute("UPDATE runtime_lease SET expires=0 WHERE name='worker' AND holder=?", (holder,))
+
+
 def _reserve_admission(con, job_id, owner_id, kind, now):
+    if settings.db_backend == 'mariadb':
+        row = con.execute("SELECT value FROM app_meta WHERE name='admission_after'").fetchone()
+        after = float(row[0]) if row else 0
+        if after > now:
+            raise ResourceLimit('이전 사용량을 확인할 수 없어 보호 대기 중입니다. 24시간 경과 후 새 작업을 접수합니다.', math.ceil(after-now))
     cutoff = now - settings.quota_window
     count, oldest = con.execute(
         'SELECT COUNT(*),MIN(created_at) FROM admissions WHERE owner_id=? AND kind=? AND created_at>?',
@@ -68,8 +138,8 @@ def _check_queue(con, owner_id):
 
 
 def quota_status(owner_id):
-    now = time.time()
     with _connect() as con:
+        now = con.now()
         rows = con.execute('SELECT kind,COUNT(*),MIN(created_at) FROM admissions WHERE owner_id=? AND created_at>? GROUP BY kind',
                            (owner_id, now-settings.quota_window)).fetchall()
     counts = {row[0]: row[1] for row in rows}
@@ -78,33 +148,28 @@ def quota_status(owner_id):
             'warning': used >= settings.quota_warn, 'reached': used >= settings.quota_limit}
 
 
-@contextmanager
-def _connect(*, timeout=60):
-    settings.prepare()
-    con = sqlite3.connect(settings.db_path, timeout=timeout)
-    con.row_factory = sqlite3.Row
-    try:
-        con.execute('PRAGMA secure_delete=ON')
-        page_size = con.execute('PRAGMA page_size').fetchone()[0]
-        con.execute(f'PRAGMA max_page_count={settings.max_db_bytes // page_size}')
-        with con:
-            yield con
-    finally:
-        con.close()
+def _connect(*, timeout=5):
+    return database.connect(settings, timeout=timeout)
 
 
 def init_db() -> None:
+    if settings.db_backend == 'mariadb':
+        from .persistence import verify_ready
+        verify_ready(settings)
+        return
     with _connect() as con:
         migrating_quota = not con.execute("SELECT 1 FROM sqlite_master WHERE name='admissions'").fetchone()
         con.executescript(SCHEMA)
-        con.execute("BEGIN IMMEDIATE")
+        con.begin()
         columns = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
         for name, definition in (("owner_id", "TEXT"), ("auth_id", "TEXT"),
                                  ("summary", "TEXT NOT NULL DEFAULT '{}'"),
-                                 ("reuse_pdf", "INTEGER NOT NULL DEFAULT 0")):
+                                 ("reuse_pdf", "INTEGER NOT NULL DEFAULT 0"), ("worker_id", "TEXT")):
             if name not in columns:
                 con.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
         con.execute("CREATE INDEX IF NOT EXISTS jobs_owner_idx ON jobs(owner_id, created_at)")
+        con.execute("CREATE TABLE IF NOT EXISTS runtime_lease (name TEXT PRIMARY KEY, holder TEXT NOT NULL, expires REAL NOT NULL)")
+        con.execute("CREATE TABLE IF NOT EXISTS app_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
         # Legacy jobs have no authenticated owner; never expose or execute them.
         con.execute("UPDATE jobs SET status='failed', step='failed' WHERE owner_id IS NULL AND status='pending'")
         # Account for recent work accepted before the quota upgrade.
@@ -119,8 +184,8 @@ def create_job(case_number: str, live: bool, pdf_url_override: str = "", *, owne
         raise ValueError("인증된 작업 소유자가 필요합니다.")
     job_id = uuid.uuid4().hex[:12]
     with _connect() as con:
-        con.execute('BEGIN IMMEDIATE')
-        now = time.time()
+        con.begin()
+        now = con.now()
         _check_queue(con, owner_id)
         if con.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] >= settings.max_job_records:
             raise ResourceLimit('서버의 작업 보관 한도에 도달했습니다. 잠시 후 다시 시도하세요.')
@@ -141,7 +206,7 @@ def queue_publication(job_id: str, *, owner_id: str, auth_id: str, owner_name: s
     if not owner_id or not auth_id:
         return False
     with _connect() as con:
-        con.execute("BEGIN IMMEDIATE")
+        con.begin()
         row = con.execute("SELECT * FROM jobs WHERE id=? AND owner_id=?", (job_id, owner_id)).fetchone()
         if not row:
             return False
@@ -155,7 +220,7 @@ def queue_publication(job_id: str, *, owner_id: str, auth_id: str, owner_name: s
                 payload.get(k) for k in ('case', 'pdf_path', 'pdf_sha1', 'page_count')):
             return False
         _check_queue(con, owner_id)
-        _reserve_admission(con, job_id, owner_id, 'publish', time.time())
+        _reserve_admission(con, job_id, owner_id, 'publish', con.now())
         summary['dry_run'] = False
         con.execute(
             "UPDATE jobs SET live=1,reuse_pdf=1,status='pending',step='queued',auth_id=?,"
@@ -186,19 +251,23 @@ def list_jobs(owner_id: str, limit: int = 30) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-def claim_next_job() -> dict[str, Any] | None:
+def claim_next_job(holder=None) -> dict[str, Any] | None:
     with _connect() as con:
-        con.execute("BEGIN IMMEDIATE")
+        con.begin()
+        if holder:
+            lease = con.execute("SELECT holder,expires FROM runtime_lease WHERE name='worker'").fetchone()
+            if not lease or lease['holder'] != holder or lease['expires'] <= con.now():
+                raise LeaseLost('작업 실행권이 없습니다.')
         row = con.execute(
             "SELECT * FROM jobs WHERE status='pending' AND owner_id IS NOT NULL ORDER BY created_at LIMIT 1"
         ).fetchone()
         if not row:
             con.commit()
             return None
-        now = time.time()
+        now = con.now()
         con.execute(
-            "UPDATE jobs SET status='running', step='starting', updated_at=? WHERE id=? AND status='pending'",
-            (now, row["id"]),
+            "UPDATE jobs SET status='running', step='starting', updated_at=?,worker_id=? WHERE id=? AND status='pending'",
+            (now, holder, row["id"]),
         )
         con.commit()
     return get_job(row["id"])
@@ -206,11 +275,10 @@ def claim_next_job() -> dict[str, Any] | None:
 
 def cleanup_records():
     with _connect() as con:
-        now = time.time()
-        con.execute('DELETE FROM admissions WHERE rowid IN (SELECT rowid FROM admissions WHERE created_at<=? LIMIT 500)',
-                    (now-settings.quota_window,))
-        con.execute("DELETE FROM jobs WHERE id IN (SELECT id FROM jobs WHERE status IN ('done','failed') AND updated_at<=? LIMIT 100)",
-                    (now-settings.job_retention,))
+        con.begin()
+        now = con.now()
+        con.bounded_delete('admissions', 'created_at<=?', (now-settings.quota_window,), 500)
+        con.bounded_delete('jobs', "status IN ('done','failed') AND updated_at<=?", (now-settings.job_retention,), 100)
 
 
 def update_job(job_id: str, **fields: Any) -> None:
@@ -230,6 +298,9 @@ def update_job(job_id: str, **fields: Any) -> None:
     values.append(time.time())
     values.append(job_id)
     with _connect() as con:
+        con.begin()
+        _guard(con, job_id)
+        values[-2] = con.now()
         con.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id=?", values)
         row = con.execute('SELECT id,case_number,owner_id,live FROM jobs WHERE id=?', (job_id,)).fetchone() if fields.get('status') in {'done', 'failed'} else None
     if row and row['owner_id']:
@@ -238,30 +309,34 @@ def update_job(job_id: str, **fields: Any) -> None:
 
 def append_log(job_id: str, message: str) -> None:
     with _connect() as con:
+        con.begin()
+        _guard(con, job_id)
         row = con.execute("SELECT log FROM jobs WHERE id=?", (job_id,)).fetchone()
         old = row[0] if row else ""
         text = (old + ("\n" if old else "") + message)[-16000:]
-        con.execute("UPDATE jobs SET log=?,updated_at=? WHERE id=?", (text, time.time(), job_id))
+        con.execute("UPDATE jobs SET log=?,updated_at=? WHERE id=?", (text, con.now(), job_id))
 
 
 def update_summary(job_id: str, **fields) -> None:
     allowed = {"case_confirmed", "pdf_downloaded", "page_count", "pdf_filename", "edition", "dry_run",
                "commons_title", "commons_reused", "wikisource_title"}
     with _connect() as con:
-        con.execute("BEGIN IMMEDIATE")
+        con.begin()
+        _guard(con, job_id)
         row = con.execute("SELECT summary FROM jobs WHERE id=?", (job_id,)).fetchone()
         if not row:
             return
         data = json.loads(row[0] or "{}")
         data.update({k: v for k, v in fields.items() if k in allowed})
         con.execute("UPDATE jobs SET summary=?, updated_at=? WHERE id=?",
-                    (json.dumps(data, ensure_ascii=False), time.time(), job_id))
+                    (json.dumps(data, ensure_ascii=False), con.now(), job_id))
 
 
 def fail_job(job_id: str, code: str, **context) -> None:
     """Keep the last processing stage and safe reason atomically with failure."""
     with _connect() as con:
-        con.execute('BEGIN IMMEDIATE')
+        con.begin()
+        _guard(con, job_id)
         row = con.execute('SELECT id,case_number,owner_id,live,step,summary FROM jobs WHERE id=?', (job_id,)).fetchone()
         if not row:
             return

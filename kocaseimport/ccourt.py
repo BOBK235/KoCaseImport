@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .resources import check_storage_lock
 
 import json
 import re
@@ -217,7 +218,7 @@ class CCourtClient:
             raise CCourtError("헌재 응답의 날짜 형식이 YYYYMMDD가 아니거나 유효하지 않습니다.") from None
 
     def download_pdf(self, meta: CaseMetadata, dest: Path) -> Path:
-        from .resources import download_budget
+        from .resources import check_storage_lock, download_budget
         with download_budget(settings) as budget:
             return self._download_pdf(meta, dest, budget)
 
@@ -247,7 +248,8 @@ class CCourtClient:
                         raise CCourtError('PDF 크기 또는 보관 공간 한도를 초과했습니다.', code=size_code)
                     received = 0
                     with temporary.open("wb") as f:
-                        for chunk in r.iter_content(64 * 1024):
+                        for chunk in r.iter_content(256 * 1024):
+                            check_storage_lock()
                             if time.monotonic() > deadline:
                                 raise CCourtError('PDF 다운로드 시간 한도를 초과했습니다.', code='pdf_timeout')
                             if chunk:

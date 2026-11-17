@@ -5,7 +5,7 @@ import secrets
 from pathlib import Path
 from flask import Flask, abort, flash, g, redirect, render_template, request, send_file, session, url_for
 from .config import settings
-from . import auth, audit, history
+from . import auth, audit, history, database
 from .store import create_job, get_job, init_db, list_jobs, public_job, queue_publication, quota_status, ResourceLimit, admin_recent_jobs
 from .utils import normalize_case_number, resolve_job_pdf
 
@@ -53,6 +53,9 @@ def create_app() -> Flask:
         return job
 
     def downloaded_pdf(job):
+        if settings.db_backend == 'mariadb':
+            from .persistence import verify_ready
+            verify_ready(settings)
         summary = json.loads(job.get('summary') or '{}')
         if not summary.get('pdf_downloaded'):
             return None
@@ -231,6 +234,10 @@ def create_app() -> Flask:
         return render_template('admin.html', identity=g.identity, events=rows, older=older,
                                actor_id=actor_id, case_number=case_number,
                                current_jobs=admin_recent_jobs() if not before and not actor_id and not case_number else [])
+
+    @app.errorhandler(database.DatabaseUnavailable)
+    def database_failure(error):
+        return render_template('error.html', message=str(error)), 503
 
     @app.errorhandler(history.HistoryError)
     def history_failure(error):

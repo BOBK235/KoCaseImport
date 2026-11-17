@@ -1,5 +1,7 @@
 """Bounded disk use and worker-only retention maintenance (Toolforge/Linux)."""
 from contextlib import contextmanager
+from contextvars import ContextVar
+from . import database
 import fcntl
 import json
 from pathlib import Path
@@ -10,9 +12,31 @@ import time
 from .store import _connect, ResourceLimit
 
 
+_storage_check = ContextVar('storage_check', default=None)
+
+def check_storage_lock():
+    from .store import execution, assert_execution
+    if execution.get():
+        assert_execution(execution.get()[0])
+    check = _storage_check.get()
+    if check:
+        check()
+
+
 @contextmanager
 def storage_lock(cfg, *, blocking=True):
+    if cfg.db_backend == 'mariadb':
+        from .persistence import verify_ready
+        verify_ready(cfg)
     cfg.work_dir.mkdir(parents=True, exist_ok=True)
+    if cfg.db_backend == 'mariadb':
+        with database.named_lock(cfg, 'storage', timeout=2 if blocking else 0) as check:
+            token = _storage_check.set(check)
+            try:
+                yield
+            finally:
+                _storage_check.reset(token)
+        return
     with (cfg.work_dir / '.storage.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
@@ -40,7 +64,7 @@ def cleanup_files(cfg):
             if not re.fullmatch(r'[0-9a-f]{12}', directory.name) or directory.is_symlink() or not directory.is_dir():
                 continue
             with _connect() as con:
-                con.execute('BEGIN IMMEDIATE')
+                con.begin()
                 row = con.execute('SELECT status,updated_at,summary FROM jobs WHERE id=?', (directory.name,)).fetchone()
                 if row and (row['status'] in {'pending', 'running'} or row['updated_at'] > cutoff):
                     continue
@@ -67,6 +91,7 @@ def write_manifest(cfg, job_dir, data):
         raise ResourceLimit('작업 결과 보관 크기 한도를 초과했습니다.')
     path = job_dir / 'manifest.json'
     with storage_lock(cfg):
+        check_storage_lock()
         used = sum(p.stat().st_size for p in cfg.work_dir.rglob('*') if p.is_file() and not p.is_symlink())
         old_size = path.stat().st_size if path.is_file() else 0
         if used - old_size + len(encoded) > cfg.max_work_bytes:
