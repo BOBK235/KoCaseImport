@@ -42,7 +42,7 @@ class Settings:
     live_edits: bool = _bool("KOCASE_LIVE_EDITS", False)
     user_agent: str = os.getenv(
         "KOCASE_USER_AGENT",
-        "KoCaseImport/0.2.7 (https://ko.wikisource.org/)"
+        "KoCaseImport/0.2.8 (https://ko.wikisource.org/)"
     )
 
     ccourt_service_key: str = field(default=os.getenv("CCOURT_SERVICE_KEY", ""), repr=False)
@@ -69,8 +69,16 @@ class Settings:
     ocr_engine: str = os.getenv("OCR_ENGINE", "tesseract")
     ocr_lang: str = os.getenv("OCR_LANG", "kor")
     ocr_psm: int = int(os.getenv("OCR_PSM", "3"))
-    ocr_min_text_chars: int = int(os.getenv("OCR_MIN_TEXT_CHARS", "80"))
     ocr_timeout: int = int(os.getenv("OCR_TIMEOUT", "120"))
+    ocr_local_lang: str = os.getenv('OCR_LOCAL_LANG', 'kor+eng')
+    ocr_local_psm: int = int(os.getenv('OCR_LOCAL_PSM', '6'))
+    ocr_tessdata_dir: str = os.getenv('OCR_TESSDATA_DIR', os.getenv('TESSDATA_PREFIX', ''))
+    ocr_page_text_bytes: int = 128 * 1024
+    ocr_total_text_bytes: int = 8 * 1024 * 1024
+    ocr_response_bytes: int = 1024 * 1024
+    ocr_render_dpi: int = 200
+    ocr_render_side: int = 3000
+    ocr_render_pixels: int = 8_000_000
 
     overwrite: bool = _bool("KOCASE_OVERWRITE", False)
     edit_delay: float = float(os.getenv("KOCASE_EDIT_DELAY", "0.6"))

@@ -7,3 +7,6 @@ gunicorn==23.0.0
 Authlib==1.9.3
 cryptography==46.0.7
 PyMySQL==1.1.2
+pyocr==0.8.5
+pypdfium2==5.15.2
+Pillow==13.0.0

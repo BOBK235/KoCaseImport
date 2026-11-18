@@ -10,7 +10,16 @@ from .config import settings
 
 
 class MediaWikiError(RuntimeError):
-    pass
+    def __init__(self, message, *, code=''):
+        super().__init__(message)
+        self.code = str(code)[:80]
+
+    @property
+    def authentication_failed(self):
+        return self.code.startswith('mwoauth-') or self.code in {
+            'assertuserfailed', 'assertnameduserfailed', 'notloggedin',
+            'readapidenied', 'permissiondenied', 'badtoken',
+        }
 
 
 class MediaWikiClient:
@@ -28,7 +37,7 @@ class MediaWikiClient:
         if self.token_provider is not None:
             token = self.token_provider()
             if not token:
-                raise MediaWikiError("사용자 OAuth 인증이 필요합니다.")
+                raise MediaWikiError("사용자 OAuth 인증이 필요합니다.", code='notloggedin')
             header = f"Bearer {token}"
             if self.s.headers.get("Authorization") != header:
                 self._csrf = ""
@@ -61,8 +70,11 @@ class MediaWikiClient:
         r = self.s.get(self.api_url, params=params, timeout=60)
         r.raise_for_status()
         data = r.json()
+        if not isinstance(data, dict):
+            raise MediaWikiError('MediaWiki API 응답 형식이 올바르지 않습니다.')
         if "error" in data:
-            raise MediaWikiError(str(data["error"]))
+            error = data['error']
+            raise MediaWikiError(str(error), code=error.get('code', '') if isinstance(error, dict) else '')
         return data
 
     def post(self, data: dict[str, Any], files=None, raw: bool = False) -> dict[str, Any]:
@@ -147,9 +159,16 @@ class MediaWikiClient:
 
     def image_for_page(self, page_title: str) -> str:
         data = self.get({"action": "query", "prop": "imageforpage", "titles": page_title})
-        page = data["query"]["pages"][0]
-        info = page.get("imagesforpage", {})
+        query = data.get('query')
+        pages = query.get('pages', []) if isinstance(query, dict) else []
+        if not isinstance(pages, list) or not pages or not isinstance(pages[0], dict):
+            return ''
+        info = pages[0].get("imagesforpage") or {}
+        if not isinstance(info, dict):
+            return ''
         url = info.get("fullsize") or info.get("thumbnail") or ""
+        if not isinstance(url, str):
+            return ''
         if url.startswith("//"):
             url = "https:" + url
         return url

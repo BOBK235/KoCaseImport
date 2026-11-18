@@ -51,7 +51,14 @@ MESSAGES = {
     'worker_stopped': ('작업 프로세스 종료', '작업 프로세스가 정상 종료되지 않았습니다. CPU·메모리 제한 또는 다른 종료 원인일 수 있습니다.', '정확한 종료 원인은 운영자가 확인해야 합니다.'),
     'wiki_error': ('위키 게시 요청 실패', '공용 또는 위키문헌 API 요청을 완료하지 못했습니다.', '중단 단계와 이미 완료된 게시 링크를 확인하고 운영자에게 문의하세요.'),
     'external_connection': ('외부 서비스 연결 실패', '후속 처리 중 외부 서비스 연결 또는 응답에 문제가 발생했습니다.', '중단 단계와 완료된 결과를 확인한 뒤 다시 시도하세요.'),
-    'transcription_failed': ('본문 추출·OCR 실패', 'PDF 이후 단계인 본문 추출 또는 OCR을 완료하지 못했습니다.', 'PDF 다운로드 결과와 공용 링크를 확인해 주세요.'),
+    'transcription_failed': ('OCR 전사 실패', 'PDF 다운로드 이후 단계인 OCR 전사를 완료하지 못했습니다.', 'PDF 다운로드 결과와 공용 링크를 확인해 주세요.'),
+    'ocr_local_engine': ('대체 OCR 엔진 사용 불가', '위키미디어 OCR 이후 사용할 Python OCR 엔진을 불러오지 못했습니다.', '운영자가 새 requirements.txt와 project.toml을 반영해 다시 빌드해야 합니다.'),
+    'ocr_local_models': ('대체 OCR 언어 자료 없음', '로컬 OCR에 필요한 언어 자료 또는 경로 설정을 확인할 수 없습니다.', '운영자가 한국어·영어 Tesseract 자료와 OCR_LOCAL_LANG 설정을 확인해야 합니다.'),
+    'ocr_local_render': ('OCR용 쪽 이미지 생성 실패', '다운로드한 PDF의 해당 쪽을 OCR 이미지로 변환하지 못했습니다.', 'PDF에서 해당 쪽이 정상적으로 열리는지 확인해 주세요.'),
+    'ocr_local_timeout': ('대체 OCR 시간 초과', '위키미디어 OCR 실패 후 시도한 로컬 OCR도 쪽별 시간 제한에 도달했습니다.', '해당 쪽을 확인하고 필요하면 위키문헌에서 직접 전사해 주세요.'),
+    'ocr_local_failed': ('대체 OCR 실패', '위키미디어 OCR 이후의 로컬 OCR에서도 본문을 얻지 못했습니다.', '해당 쪽의 이미지와 서버 OCR 설정을 확인해 주세요.'),
+    'ocr_empty': ('OCR 본문 인식 실패', '이미지가 있지만 두 OCR 처리에서 사용할 본문을 얻지 못했습니다.', '빈 쪽으로 단정하지 않았습니다. 해당 쪽을 확인해 주세요.'),
+    'ocr_result_limit': ('OCR 결과 크기 한도 초과', 'OCR 결과가 쪽별 또는 전체 본문 크기 제한을 초과했습니다.', '운영자에게 작업번호와 해당 쪽을 알려 주세요.'),
     'legacy_failure': ('상세 원인이 기록되지 않은 실패', '이전 버전의 작업에는 사용자용 상세 오류 원인이 저장되어 있지 않습니다.', '새 작업을 실행하면 중단 원인이 구분되어 표시됩니다.'),
     'unexpected': ('예상하지 못한 처리 오류', '아래 단계에서 작업이 중단되었으나 정확한 원인을 분류하지 못했습니다. PDF 미제공으로 확인된 것은 아닙니다.', '운영자에게 작업번호와 중단 단계를 알려 주세요.'),
 }
@@ -60,7 +67,7 @@ PHASES = {
     'queued': '작업 대기', 'starting': '작업 시작·로그인 확인',
     'case_lookup': '사건 조회·PDF 주소 확인', 'download_pdf': 'PDF 다운로드',
     'verify_pdf': 'PDF 파일·쪽수 검증', 'commons_upload': '공용 업로드',
-    'wikisource_index': '위키문헌 색인 생성', 'transcription': '본문 추출·OCR',
+    'wikisource_index': '위키문헌 색인 생성', 'transcription': 'OCR 전사',
     'page_creation': '위키문헌 쪽별 문서 생성', 'main_page': '위키문헌 본문 생성',
     'save_result': '작업 결과 저장',
 }
@@ -75,6 +82,9 @@ def failure_record(code, stage='', **context):
     api = context.get('api_code')
     if isinstance(api, str) and re.fullmatch(r'[0-9]{1,3}', api):
         record['api_code'] = api
+    page_number = context.get('page_number')
+    if type(page_number) is int and 1 <= page_number <= 500:
+        record['page_number'] = page_number
     for key in ('missing_editions', 'hwp_editions'):
         values = context.get(key, [])
         if isinstance(values, (list, tuple)):
@@ -89,9 +99,11 @@ def failure_record(code, stage='', **context):
 def describe_failure(data):
     data = data if isinstance(data, dict) else {}
     record = failure_record(data.get('code'), data.get('stage'), **{
-        k: data[k] for k in ('http_status', 'api_code', 'missing_editions', 'hwp_editions', 'causes') if k in data})
+        k: data[k] for k in ('http_status', 'api_code', 'page_number', 'missing_editions', 'hwp_editions', 'causes') if k in data})
     title, message, action = MESSAGES[record['code']]
     details = []
+    if 'page_number' in record:
+        details.append(f"중단된 쪽: {record['page_number']}")
     if 'http_status' in record:
         details.append(f"HTTP 상태: {record['http_status']}")
     if 'api_code' in record:
