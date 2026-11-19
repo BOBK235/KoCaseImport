@@ -24,7 +24,7 @@
 <section>
 <h2>확인한 PDF 게시</h2>
 {% if can_publish %}
-<p>이 작업에서 확인한 PDF로 공용 업로드와 위키문헌 문서 생성을 이어서 실행합니다. <strong>{{ identity.username }}</strong> 계정으로 실제 게시됩니다.</p>
+<p>이 작업에서 확인한 PDF로 공용 업로드와 위키문헌 초안 생성을 이어서 실행합니다. <strong>{{ identity.username }}</strong> 계정으로 실제 게시됩니다.</p>
 <form method="post" action="{{ url_for('publish_job', job_id=job.id) }}">
 <input type="hidden" name="csrf" value="{{ identity.csrf }}">
 <button type="submit">내 계정으로 공용·위키문헌에 이어서 게시</button>

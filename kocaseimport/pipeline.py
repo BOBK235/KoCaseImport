@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-from .ccourt import CCourtClient
+from .ccourt import CCourtClient, CCourtError
 from .config import settings
 from .errors import PublicJobError
 from .mediawiki import MediaWikiClient
@@ -55,17 +55,30 @@ class Pipeline:
         else:
             self.step("case_lookup")
             self.log(f"사건 조회: {case_number}")
-            meta = self.ccourt.lookup(case_number, pdf_url_override=pdf_url_override)
-            self.log(f"사건 확인: {meta.case_number} / {meta.case_name}")
-            edition = meta.raw.get("source_edition", "결정문")
-            self.summary(case_confirmed=True, edition=edition)
-            suffix = f" ({edition} 수록본)" if edition in {"판례집", "공보"} else ""
-            base_name = sanitize_filename(f"{meta.case_number} {meta.case_name} 결정문{suffix}") + ".pdf"
-            job_dir = settings.work_dir / (self.job_id or meta.case_number)
-            job_dir.mkdir(parents=True, exist_ok=True)
-            pdf_path = job_dir / base_name
-            self.step("download_pdf")
-            self.ccourt.download_pdf(meta, pdf_path)
+            last_missing = None
+            for meta in self.ccourt.pdf_candidates(case_number, pdf_url_override):
+                self.log(f"사건 확인: {meta.case_number} / {meta.case_name}")
+                edition = meta.raw.get("source_edition", "결정문")
+                self.summary(case_confirmed=True, edition=edition)
+                suffix = f" ({edition} 수록본)" if edition in {"판례집", "공보"} else ""
+                base_name = sanitize_filename(f"{meta.case_number} {meta.case_name} 결정문{suffix}") + ".pdf"
+                job_dir = settings.work_dir / (self.job_id or meta.case_number)
+                job_dir.mkdir(parents=True, exist_ok=True)
+                pdf_path = job_dir / base_name
+                self.step("download_pdf")
+                try:
+                    self.ccourt.download_pdf(meta, pdf_path)
+                except CCourtError as exc:
+                    if exc.code not in {'pdf_http_missing', 'pdf_empty', 'pdf_not_pdf'} or pdf_url_override:
+                        raise
+                    last_missing = exc
+                    self.log(f"{edition}: PDF를 받을 수 없어 다음 판본 확인")
+                    self.step('case_lookup')
+                    continue
+                break
+            else:
+                self.step('download_pdf')
+                raise last_missing or CCourtError(code='pdf_missing')
             self.step('verify_pdf')
             sha1 = sha1_file(pdf_path)
             page_count = len(PdfReader(str(pdf_path)).pages)
@@ -91,7 +104,7 @@ class Pipeline:
             pdf_sha1=sha1,
             page_count=page_count,
             commons_filename=base_name,
-            main_title=meta.case_number,
+            main_title=WikisourceBuilder.work_title(meta.case_number),
         )
 
         if not effective_live:

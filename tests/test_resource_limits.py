@@ -181,3 +181,19 @@ def test_job_timeout_terminates_child_and_removes_partial_file(env, monkeypatch)
     assert store.get_job(job_id)['status'] == 'failed'
     assert store.public_job(store.get_job(job_id))['failure']['code'] == 'job_timeout'
     assert not (cfg.work_dir/job_id/'test.pdf.part').exists()
+
+
+def test_admin_exempt_on_dry_run_live_and_followup(env, monkeypatch):
+    app, _, cfg = env
+    monkeypatch.setattr(store, 'settings', replace(cfg, admin_user_ids=('101',), max_user_active_jobs=1))
+    alice = app.test_client()
+    login(alice, 'alice')
+    job, _ = completed_dry_run(alice, monkeypatch)
+    for kind in ['prepare', 'publish']:
+        seed_admissions('101', kind, 100, time.time())
+    store.create_job('96헌마186', True, owner_id='101', auth_id='test')
+    assert store.queue_publication(job, owner_id='101', auth_id='test')
+    quota = store.quota_status('101')
+    assert quota['exempt'] and not quota['warning'] and not quota['reached']
+    assert quota['publish'] == 102
+    assert '관리자 개인 한도 면제' in alice.get('/', base_url=BASE).text

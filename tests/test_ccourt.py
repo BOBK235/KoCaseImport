@@ -174,3 +174,21 @@ def test_network_failure_codes_do_not_include_request_urls(monkeypatch, tmp_path
         assert caught.value.code == code
         visible = describe_failure(failure_record(caught.value.code, **caught.value.context))
         assert 'PRIVATE-KEY' not in str(visible)
+
+
+def test_joined_case_pdf_order_from_gazette(monkeypatch):
+    c = client(monkeypatch)
+    editions = [('010500', '결정문'), ('010300', '판례집'), ('010200', '공보')]
+    def respond(url, params, label):
+        doc = params.get('docId', '12741_010200')
+        row = view(doc, dict(editions)[doc[-6:]], pdfFilePath=doc,
+                   eventNo='2004헌마554/2004헌마566',
+                   relationDecisionInfo='12741_010500||결정문',
+                   relationCaseCollectionInfo='12741_010300||판례집')
+        return row
+    c._json = respond
+    from kocaseimport.models import CaseMetadata
+    results = c._edition_candidates(CaseMetadata('2004헌마566'))
+    assert [meta.raw['source_edition'] for meta in results] == [e for _, e in editions]
+    assert c._same_case('2004헌마554/2004헌마566', '2004헌마554등')
+    assert not c._same_case('2004헌마554/2004헌마566', '2004헌마55')

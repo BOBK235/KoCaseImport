@@ -112,7 +112,8 @@ def release_worker(holder):
 
 
 def _reserve_admission(con, job_id, owner_id, kind, now):
-    if settings.db_backend == 'mariadb':
+    exempt = owner_id in settings.admin_user_ids
+    if not exempt and settings.db_backend == 'mariadb':
         row = con.execute("SELECT value FROM app_meta WHERE name='admission_after'").fetchone()
         after = float(row[0]) if row else 0
         if after > now:
@@ -122,7 +123,7 @@ def _reserve_admission(con, job_id, owner_id, kind, now):
         'SELECT COUNT(*),MIN(created_at) FROM admissions WHERE owner_id=? AND kind=? AND created_at>?',
         (owner_id, kind, cutoff),
     ).fetchone()
-    if count >= settings.quota_limit:
+    if not exempt and count >= settings.quota_limit:
         label = '실제 게시' if kind == 'publish' else '사건 준비'
         raise ResourceLimit(f'{label} limit 도달: 서버 시각 기준 최근 24시간에 100건을 접수했습니다. 추가 요청을 거부합니다.',
                             math.ceil(oldest + settings.quota_window - now))
@@ -133,6 +134,8 @@ def _reserve_admission(con, job_id, owner_id, kind, now):
 def _check_queue(con, owner_id):
     if con.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('pending','running')").fetchone()[0] >= settings.max_active_jobs:
         raise ResourceLimit('서버의 작업 대기 한도에 도달했습니다. 잠시 후 다시 시도하세요.')
+    if owner_id in settings.admin_user_ids:
+        return
     if con.execute("SELECT COUNT(*) FROM jobs WHERE owner_id=? AND status IN ('pending','running')", (owner_id,)).fetchone()[0] >= settings.max_user_active_jobs:
         raise ResourceLimit('동시에 대기·실행할 수 있는 작업은 3건입니다. 기존 작업 완료 후 다시 시도하세요.')
 
@@ -143,9 +146,11 @@ def quota_status(owner_id):
         rows = con.execute('SELECT kind,COUNT(*),MIN(created_at) FROM admissions WHERE owner_id=? AND created_at>? GROUP BY kind',
                            (owner_id, now-settings.quota_window)).fetchall()
     counts = {row[0]: row[1] for row in rows}
+    exempt = owner_id in settings.admin_user_ids
     used = max(counts.values(), default=0)
     return {'prepare': counts.get('prepare', 0), 'publish': counts.get('publish', 0),
-            'warning': used >= settings.quota_warn, 'reached': used >= settings.quota_limit}
+            'exempt': exempt, 'warning': not exempt and used >= settings.quota_warn,
+            'reached': not exempt and used >= settings.quota_limit}
 
 
 def _connect(*, timeout=5):

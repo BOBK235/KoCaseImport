@@ -263,9 +263,9 @@ def test_pipeline_summary_and_both_wikis_use_owner(env,monkeypatch):
     c=app.test_client();ident,_=login(c,'alice');job=enqueue(c)
     class Court:
         def __init__(self,on_case):self.on_case=on_case
-        def lookup(self,*args,**kwargs):
+        def pdf_candidates(self,*args,**kwargs):
             self.on_case()
-            return CaseMetadata(case_number='2016헌나1',case_name='사건',raw={'source_edition':'판례집'})
+            yield CaseMetadata(case_number='2016헌나1',case_name='사건',raw={'source_edition':'판례집'})
         def download_pdf(self,meta,dest):
             dest.parent.mkdir(parents=True,exist_ok=True)
             writer=PdfWriter();writer.add_blank_page(100,100);writer.write(dest)
@@ -299,8 +299,8 @@ def completed_dry_run(client, monkeypatch):
     from pypdf import PdfWriter
     from kocaseimport.models import CaseMetadata
     court = Mock()
-    court.lookup.return_value = CaseMetadata(case_number='2016헌나1', case_name='확인한 사건',
-                                             raw={'source_edition': '판례집'})
+    court.pdf_candidates.return_value = [CaseMetadata(case_number='2016헌나1', case_name='확인한 사건',
+                                             raw={'source_edition': '판례집'})]
     def download(meta, dest):
         writer = PdfWriter(); writer.add_blank_page(100, 100); writer.write(dest)
     court.download_pdf.side_effect = download
@@ -396,7 +396,7 @@ def test_dry_run_continues_once_with_same_pdf_and_incremental_links(env, monkeyp
     ocr.transcribe_pages.return_value = [('확인할 본문', 'pdf')]
     monkeypatch.setattr(pipeline, 'OCRClient', lambda: ocr)
     worker.run_job(claimed)
-    court.lookup.assert_called_once()
+    court.pdf_candidates.assert_called_once()
     court.download_pdf.assert_called_once()
     assert clients == [(cfg.commons_api, 'access-alice'), (cfg.wikisource_api, 'access-alice')]
     assert len(uploads) == (0 if scenario == 'reuse' else 1)
@@ -410,9 +410,9 @@ def test_dry_run_continues_once_with_same_pdf_and_incremental_links(env, monkeyp
         assert 'private-provider-error' not in page.text
     else:
         assert result['status'] == 'done'
-        assert edits == ['색인:'+filename, '페이지:'+filename+'/1', '2016헌나1']
+        assert edits == ['색인:'+filename, '페이지:'+filename+'/1', '초안:2016헌나1']
         assert '위키문헌 업로드 완료' in page.text and '위키문헌 문서 보기' in page.text
-        assert unquote(store.public_job(result)['wikisource_url']) == 'https://ko.wikisource.org/wiki/2016헌나1'
+        assert unquote(store.public_job(result)['wikisource_url']) == 'https://ko.wikisource.org/wiki/초안:2016헌나1'
     # A stale form cannot queue another attempt, even after completion/failure.
     assert alice.post(url+'/publish', data={'csrf': csrf(alice)}, base_url=BASE).status_code == 302
     assert store.claim_next_job() is None
@@ -488,10 +488,38 @@ def test_corrupt_download_reports_pdf_validation_failure(env, monkeypatch):
     alice = app.test_client(); login(alice, 'alice')
     job = enqueue(alice)
     court = Mock()
-    court.lookup.return_value = CaseMetadata('2016헌나1')
+    court.pdf_candidates.return_value = [CaseMetadata('2016헌나1')]
     court.download_pdf.side_effect = lambda meta, path: path.write_bytes(b'%PDF-corrupt')
     monkeypatch.setattr(pipeline, 'CCourtClient', lambda **kw: court)
     worker.run_job(store.claim_next_job())
     page = alice.get('/jobs/'+job, base_url=BASE)
     assert 'PDF 읽기 실패' in page.text and '중단 단계: PDF 파일·쪽수 검증' in page.text
     assert '공식 PDF 미제공' not in page.text
+
+
+def test_dry_run_uses_next_edition_when_pdf_download_is_missing(env, monkeypatch):
+    from kocaseimport.models import CaseMetadata
+    from pypdf import PdfWriter
+    app, _, _ = env
+    alice = app.test_client()
+    login(alice, 'alice')
+    court = Mock()
+    court.pdf_candidates.return_value = [
+        CaseMetadata('96헌마186', raw={'source_edition': edition})
+        for edition in ('결정문', '판례집', '공보')
+    ]
+    def download(meta, path):
+        if meta.raw['source_edition'] == '결정문':
+            raise ccourt.CCourtError(code='pdf_http_missing', http_status=404)
+        writer = PdfWriter()
+        writer.add_blank_page(100, 100)
+        writer.write(path)
+    court.download_pdf.side_effect = download
+    monkeypatch.setattr(pipeline, 'CCourtClient', lambda **kw: court)
+    job = enqueue(alice, case_number='96헌마186')
+    worker.run_job(store.claim_next_job())
+    result = store.get_job(job)
+    assert result['status'] == 'done' and court.download_pdf.call_count == 2
+    assert result['payload']['case']['raw']['source_edition'] == '판례집'
+    assert '판례집 수록본' in result['payload']['pdf_path']
+    assert result['payload']['main_title'] == '초안:96헌마186'

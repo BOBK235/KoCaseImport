@@ -1,6 +1,9 @@
 from __future__ import annotations
 from .resources import check_storage_lock
 
+from dataclasses import replace
+from heapq import heappop, heappush
+from itertools import count
 import json
 import re
 from datetime import datetime
@@ -58,11 +61,16 @@ class CCourtClient:
     @staticmethod
     def _same_case(value: str, expected: str) -> bool:
         try:
-            return normalize_case_number(value) == normalize_case_number(expected)
+            members = [normalize_case_number(part).removesuffix('등')
+                       for part in re.split(r'[/,·ㆍ․]', value)]
+            return normalize_case_number(expected).removesuffix('등') in members
         except (ValueError, AttributeError, TypeError):
             return False
 
     def lookup(self, case_number: str, pdf_url_override: str = "") -> CaseMetadata:
+        return next(self.pdf_candidates(case_number, pdf_url_override))
+
+    def pdf_candidates(self, case_number: str, pdf_url_override: str = ""):
         case_number = normalize_case_number(case_number)
         if pdf_url_override and not self._official(pdf_url_override):
             raise CCourtError("PDF URL override는 헌법재판소 공식 HTTP(S) 주소만 허용합니다.", code='pdf_address_blocked')
@@ -76,12 +84,13 @@ class CCourtClient:
             meta.pdf_url = pdf_url_override
             meta.case_name = meta.case_name or f"{case_number} 결정"
             meta.raw["source_edition"] = "사용자 지정 PDF"
-            return meta
-        return self._resolve_pdf(meta)
+            yield meta
+            return
+        yield from self._edition_candidates(meta)
 
     def _lookup_openapi(self, case_number: str) -> CaseMetadata:
         params = {"serviceKey": settings.ccourt_service_key,
-                  settings.ccourt_case_param: case_number,
+                  settings.ccourt_case_param: case_number.removesuffix("등"),
                   "pageNo": 1, "numOfRows": 100, "type": "json"}
         data = self._json(settings.ccourt_openapi_url, params, "헌재 OpenAPI")
         header = data.get("header")
@@ -131,7 +140,7 @@ class CCourtClient:
                 raise CCourtError("헌재 상세 화면의 docId 또는 idx를 확인하세요.", code='lookup_address')
             params["docId"] = doc_id
         else:
-            params["eventNo"] = case_number
+            params["eventNo"] = case_number.removesuffix("등")
         data = self._json(self.VIEW_API, params, "헌재 iSearch 상세 조회")
         obj = data.get("returnObject")
         item = obj.get("00") if isinstance(obj, dict) else None
@@ -145,58 +154,85 @@ class CCourtClient:
         return item
 
     def _resolve_pdf(self, meta: CaseMetadata) -> CaseMetadata:
-        api_item = meta.raw.get("openapi", {})
-        queue = [meta.source_page_url]
+        return next(self._edition_candidates(meta))
+
+    def _edition_candidates(self, meta: CaseMetadata):
+        editions = ('결정문', '판례집', '공보')
+        relations = ('relationDecisionInfo', 'relationCaseCollectionInfo', 'relationPublishInfo')
+        pending, ready = [], []
+        sequence = count()
+        scheduled, seen_docs = set(), set()
+        errors, unavailable, missing_editions, hwp_editions = [], [], [], []
+        yielded = False
+
+        def schedule(rank, url):
+            if url not in scheduled:
+                scheduled.add(url)
+                heappush(pending, (rank, next(sequence), url))
+
+        schedule(0, meta.source_page_url)
+        api_item = meta.raw.get('openapi', {})
         if settings.ccourt_allow_published_pdf:
-            for key, link in (("pdntList", "pdntHp"), ("ogList", "ogHp")):
+            for rank, (key, link) in enumerate((('pdntList', 'pdntHp'), ('ogList', 'ogHp')), 1):
                 rows = api_item.get(key) or []
                 if isinstance(rows, dict):
                     rows = [rows]
                 if isinstance(rows, list):
-                    queue.extend(x[link] for x in rows
-                                 if isinstance(x, dict) and isinstance(x.get(link), str) and x[link])
-        seen, errors, unavailable = set(), [], []
-        missing_editions, hwp_editions = [], []
-        for url in queue:
-            if url in seen:
+                    for row in rows:
+                        if isinstance(row, dict) and isinstance(row.get(link), str) and row[link]:
+                            schedule(rank, row[link])
+
+        while pending or ready:
+            # A case-number lookup may return a collection or gazette first.
+            # Resolve links to higher priority editions before using its PDF.
+            if ready and (not pending or ready[0][0] <= pending[0][0]):
+                yielded = True
+                yield heappop(ready)[2]
                 continue
-            seen.add(url)
+            _, _, url = heappop(pending)
             try:
                 item = self._view(url, meta.case_number)
             except CCourtError as exc:
                 errors.append(exc)
                 continue
-            edition = item.get("name")
-            if edition not in {"결정문", "판례집", "공보"}:
+            edition = item.get('name')
+            if edition not in editions:
                 errors.append(CCourtError("헌재 iSearch: 지원하지 않는 자료 유형입니다."))
                 continue
-            if not settings.ccourt_allow_published_pdf and edition != "결정문":
-                unavailable.append("판례집·공보 대체 사용이 꺼져 있음")
+            doc_id = item.get('docId', '')
+            if doc_id:
+                if doc_id in seen_docs:
+                    continue
+                seen_docs.add(doc_id)
+            for rank, key in enumerate(relations):
+                if rank and not settings.ccourt_allow_published_pdf:
+                    break
+                value = item.get(key)
+                related = value.split('||', 1)[0] if isinstance(value, str) else ''
+                suffix = ('010500', '010300', '010200')[rank]
+                if re.fullmatch(r'[0-9]+_' + suffix, related) and related not in seen_docs:
+                    schedule(rank, self.ISEARCH_BASE + 'view.do?' + urlencode({'idx':'00', 'docId':related}))
+            if edition != editions[0] and not settings.ccourt_allow_published_pdf:
                 continue
             token = item.get("pdfFilePath")
             if isinstance(token, str) and token.strip():
-                meta.pdf_url = self.ISEARCH_BASE + "downloadEX.do?" + urlencode({"filePath": token})
-                meta.doc_id = str(item.get("docId") or "")
-                meta.source_page_url = self.ISEARCH_BASE + "view.do?" + urlencode({"idx": "00", "docId": meta.doc_id})
-                meta.case_name = meta.case_name or str(item.get("eventName") or meta.case_number).strip()
-                meta.decision_date = meta.decision_date or self._iso_date(str(item.get("date") or ""))
-                meta.result = meta.result or str(item.get("endRsta") or "").strip()
-                meta.raw.update({"source_edition": edition,
-                                 "pdf_resolution": "isearch pdfFilePath → downloadEX.do",
-                                 "lookup_warnings": [str(e) for e in errors]})
-                return meta
-            unavailable.append(f"{edition}: PDF 없음" + (" (HWP 제공)" if item.get("hwpFilePath") else ""))
-            missing_editions.append(edition)
-            if item.get('hwpFilePath'):
-                hwp_editions.append(edition)
-            if settings.ccourt_allow_published_pdf:
-                for key in ("relationCaseCollectionInfo", "relationPublishInfo"):
-                    value = item.get(key)
-                    doc = value.split("||", 1)[0] if isinstance(value, str) else ""
-                    if re.fullmatch(r"\d+_010(?:300|200)", doc):
-                        related = self.ISEARCH_BASE + "view.do?" + urlencode({"idx": "00", "docId": doc})
-                        if related not in queue:
-                            queue.append(related)
+                candidate = replace(meta, doc_id=doc_id,
+                    pdf_url=self.ISEARCH_BASE + 'downloadEX.do?' + urlencode({'filePath': token}),
+                    source_page_url=self.ISEARCH_BASE + 'view.do?' + urlencode({'idx': '00', 'docId': doc_id}),
+                    case_name=meta.case_name or str(item.get('eventName') or meta.case_number).strip(),
+                    decision_date=meta.decision_date or self._iso_date(str(item.get('date') or '')),
+                    result=meta.result or str(item.get('endRsta') or '').strip(),
+                    raw={**meta.raw, 'source_edition': edition,
+                         'pdf_resolution': 'isearch pdfFilePath → downloadEX.do',
+                         'lookup_warnings': [str(e) for e in errors]})
+                heappush(ready, (editions.index(edition), next(sequence), candidate))
+            else:
+                unavailable.append(f"{edition}: PDF 없음")
+                missing_editions.append(edition)
+                if item.get('hwpFilePath'):
+                    hwp_editions.append(edition)
+        if yielded and not errors:
+            return
         details = "; ".join(unavailable + [str(e) for e in errors])
         code = ('pdf_lookup_incomplete' if errors else
                 'pdf_missing' if settings.ccourt_allow_published_pdf else 'pdf_alternatives_disabled')

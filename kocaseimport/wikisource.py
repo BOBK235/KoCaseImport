@@ -88,8 +88,12 @@ class WikisourceBuilder:
             logger(f"{i}/{len(texts)}: 페이지 생성")
         return titles
 
+    @staticmethod
+    def work_title(case_number):
+        return f'초안:{case_number}'
+
     def create_main(self, meta: CaseMetadata, filename: str, page_count: int) -> str:
-        title = meta.case_number
+        title = self.work_title(meta.case_number)
         if self.client.page_exists(title) and not settings.overwrite:
             return title
         def value(text):
