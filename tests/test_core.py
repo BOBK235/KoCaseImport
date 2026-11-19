@@ -32,10 +32,12 @@ def test_proofread_serialization():
 def test_main_header_license_and_only_requested_category():
     from unittest.mock import Mock
     from kocaseimport.models import CaseMetadata
-    client = Mock(); client.page_exists.return_value = False
+    client = Mock(); client.page_exists.return_value = True
     meta = CaseMetadata('2016헌나1', case_name='대통령(박근혜)탄핵', decision_date='2017-03-10',
                         raw={'source_edition': '판례집'})
     WikisourceBuilder(client).create_main(meta, '결정문.pdf', 70)
+    assert client.edit_page.call_args.args[0] == '초안:2016헌나1'
+    assert client.edit_page.call_args.kwargs['createonly'] is False
     text = client.edit_page.call_args.args[1]
     assert text.startswith('{{머리말\n')
     assert '| 제목 = 2016헌나1\n' in text and '| 부제 = 대통령(박근혜)탄핵\n' in text

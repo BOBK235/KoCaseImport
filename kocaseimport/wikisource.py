@@ -94,8 +94,7 @@ class WikisourceBuilder:
 
     def create_main(self, meta: CaseMetadata, filename: str, page_count: int) -> str:
         title = self.work_title(meta.case_number)
-        if self.client.page_exists(title) and not settings.overwrite:
-            return title
+
         def value(text):
             text = escape(' '.join(str(text).split()), quote=True)
             for char in '|{}[]':
@@ -125,7 +124,7 @@ class WikisourceBuilder:
         self.client.edit_page(
             title,
             text,
-            "헌법재판소 결정문 본문 자동 생성 (KoCaseImport)",
-            createonly=not settings.overwrite,
+            "헌법재판소 결정문 초안 게시 (KoCaseImport)",
+            createonly=False,
         )
         return title

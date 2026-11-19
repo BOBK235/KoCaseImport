@@ -11,7 +11,7 @@
 <label for="case">사건번호</label><input id="case" name="case_number" type="text" placeholder="97헌가12 또는 2016헌나1" maxlength="40" required aria-describedby="case-help">
 <p id="case-help" class="muted">과거 사건은 97헌가12처럼 두 자리 연도로 입력할 수 있습니다. 2000년 이후 사건은 네 자리 연도를 입력하세요.</p>
 <details><summary>공식 PDF 주소 직접 지정</summary><label for="pdf">헌법재판소 PDF 주소</label><input id="pdf" name="pdf_url" type="url" placeholder="https://…ccourt.go.kr/…" maxlength="4096"></details>
-{% if live_enabled %}<label><input type="checkbox" name="live" value="1"> 내 계정으로 Commons 업로드 및 위키문헌 초안 생성을 실행합니다.</label>{% endif %}
+{% if live_enabled %}<label><input type="checkbox" name="live" value="1"> 내 계정으로 Commons 업로드 및 위키문헌 초안 게시를 실행합니다. 기존 초안은 이번 내용으로 덮어씁니다.</label>{% endif %}
 <p class="muted">{% if live_enabled %}선택하지 않으면 {% endif %}Dry-run으로 원문 확인과 PDF 다운로드만 진행합니다.</p><button type="submit">가져오기 시작</button>
 <p class="muted">운영자는 사용자명·고유 ID, 사건번호, 요청 종류·시각과 처리 결과를 확인할 수 있습니다. 요청 기록은 최대 30일 보관하며 보관 용량에 따라 더 일찍 삭제될 수 있습니다.</p>
 </form></section>
