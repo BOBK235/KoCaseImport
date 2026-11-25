@@ -23,6 +23,7 @@ class AuditUnavailable(RuntimeError):
 
 ACTIONS = {
     'job_requested': '사건 준비 요청', 'publication_requested': '후속 게시 요청',
+    'page_edit_requested': '쪽별 교정문 반영 요청',
     'job_finished': '작업 종료', 'delete_requested': '기록·파일 삭제 요청',
     'job_deleted': '기록·파일 삭제 완료', 'admin_view': '관리자 기록 열람',
 }

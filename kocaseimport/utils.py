@@ -82,3 +82,15 @@ def text_is_usable(text: str, min_chars: int = 80) -> bool:
         for ch in s
     ) / max(len(s), 1)
     return printable > 0.95 and semantic > 0.55
+
+
+def pdf_wikitext(text: str) -> str:
+    # Keep literal PDF characters from introducing wiki markup in a new transcription.
+    escapes = str.maketrans({c: f'&#{ord(c)};' for c in "&<>[]{}|'~"})
+    lines = []
+    for line in text.split('\n'):
+        value = line.translate(escapes)
+        if line.startswith(('*', '#', ':', ';', '=', '----', '__')):
+            value = f'&#{ord(line[0])};' + value[1:]
+        lines.append(value)
+    return '\n'.join(lines)

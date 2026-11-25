@@ -13,9 +13,10 @@ import re
 import resource
 import signal
 import time
+import unicodedata
 
 from .errors import PublicJobError
-from .utils import clean_extracted_text
+from .utils import clean_extracted_text, text_is_usable
 
 
 def _tessdata(cfg):
@@ -87,7 +88,37 @@ def _render_and_ocr(pdf_path, number, cfg):
             page.close()
 
 
-def _child(send, pdf_path, number, cfg, parent):
+def _pdf_text(pdf_path, number, cfg):
+    import pypdfium2 as pdfium
+
+    with pdfium.PdfDocument(str(pdf_path)) as document:
+        page = document[number - 1]
+        try:
+            layer = page.get_textpage()
+            try:
+                if layer.count_chars() > cfg.ocr_page_text_bytes:
+                    raise PublicJobError(code='ocr_result_limit')
+                # Exclude running headers and folios when looking for body text.
+                left, bottom, right, top = page.get_bbox()
+                margin = (top - bottom) * 0.12
+                middle = layer.get_text_bounded(left, bottom + margin, right, top - margin,
+                                                errors='replace')
+                if len(re.findall(r'[가-힣]', middle)) < 20 or not text_is_usable(middle, 36):
+                    return '', 'pdf-text'
+                text = layer.get_text_bounded(errors='replace')
+            finally:
+                layer.close()
+        finally:
+            page.close()
+    # Missing character maps can yield printable CID placeholders or private-use glyphs.
+    if (re.search(r'\(cid:\d+\)|[\ufffd\x00-\x08\x0b\x0e-\x1f]', text, re.I)
+            or any(unicodedata.category(ch) == 'Co' for ch in text)
+            or len(set(re.findall(r'[가-힣]', middle))) < 8):
+        return '', 'pdf-text'
+    return clean_extracted_text(text), 'pdf-text'
+
+
+def _child(send, pdf_path, number, cfg, parent, operation, seconds):
     try:
         # Linux: a hard-killed job must not leave a native OCR child running.
         libc = ctypes.CDLL(None, use_errno=True)
@@ -95,13 +126,14 @@ def _child(send, pdf_path, number, cfg, parent):
             os._exit(1)
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         resource.setrlimit(resource.RLIMIT_AS, (cfg.job_memory_bytes, cfg.job_memory_bytes))
-        seconds = max(1, min(cfg.ocr_timeout, 120))
         resource.setrlimit(resource.RLIMIT_CPU, (seconds, seconds))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         # Native error messages can include filesystem paths; use fixed codes.
         with open(os.devnull, 'wb') as sink:
             os.dup2(sink.fileno(), 2)
-        text, source = _render_and_ocr(pdf_path, number, cfg)
+        text, source = operation(pdf_path, number, cfg)
+        if len(text.encode('utf-8')) > cfg.ocr_page_text_bytes:
+            raise PublicJobError(code='ocr_result_limit')
         result = {'text': text, 'source': source}
     except PublicJobError as error:
         result = {'error': error.code}
@@ -116,14 +148,30 @@ def _child(send, pdf_path, number, cfg, parent):
 
 
 def recognize_page(pdf_path, number, cfg, *, guard=lambda: None):
+    return _run_page(pdf_path, number, cfg, guard, _render_and_ocr,
+                     {'pyocr-tesseract', 'pyocr-blank'}, max(1, min(cfg.ocr_timeout, 120)))
+
+
+def extract_page_text(pdf_path, number, cfg, *, guard=lambda: None):
+    try:
+        text, _ = _run_page(pdf_path, number, cfg, guard, _pdf_text, {'pdf-text'},
+                            max(1, min(cfg.ocr_timeout, 8)))
+        return text
+    except PublicJobError as error:
+        if error.code not in {'ocr_local_failed', 'ocr_local_timeout'}:
+            raise
+        return ''
+
+
+def _run_page(pdf_path, number, cfg, guard, operation, sources, seconds):
     guard()
     ctx = multiprocessing.get_context('fork')
     receive, send = ctx.Pipe(duplex=False)
-    process = ctx.Process(target=_child, args=(send, pdf_path, number, cfg, os.getpid()))
+    process = ctx.Process(target=_child, args=(send, pdf_path, number, cfg, os.getpid(), operation, seconds))
     started = False
     try:
         process.start(); started = True; send.close()
-        deadline = time.monotonic() + max(1, min(cfg.ocr_timeout, 120))
+        deadline = time.monotonic() + seconds
         while True:
             remaining = deadline-time.monotonic()
             if remaining <= 0:
@@ -139,7 +187,7 @@ def recognize_page(pdf_path, number, cfg, *, guard=lambda: None):
                 if result.get('error'):
                     raise PublicJobError(code=result['error'])
                 text, source = result.get('text'), result.get('source')
-                if not isinstance(text, str) or source not in {'pyocr-tesseract', 'pyocr-blank'}:
+                if not isinstance(text, str) or source not in sources:
                     raise PublicJobError(code='ocr_local_failed')
                 if len(text.encode('utf-8')) > cfg.ocr_page_text_bytes:
                     raise PublicJobError(code='ocr_result_limit')

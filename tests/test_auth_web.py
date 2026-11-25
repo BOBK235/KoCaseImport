@@ -523,3 +523,46 @@ def test_dry_run_uses_next_edition_when_pdf_download_is_missing(env, monkeypatch
     assert result['payload']['case']['raw']['source_edition'] == '판례집'
     assert '판례집 수록본' in result['payload']['pdf_path']
     assert result['payload']['main_title'] == '초안:96헌마186'
+
+
+def test_review_requires_owner_preview_and_current_revision(env, monkeypatch):
+    app, _, cfg = env
+    alice, bob = app.test_client(), app.test_client()
+    login(alice, 'alice')
+    login(bob, 'bob')
+    job, _ = completed_dry_run(alice, monkeypatch)
+    url = f'/jobs/{job}/page-review'
+    form = {'page': 1, 'csrf': csrf(alice)}
+    assert alice.post(url, data=form, base_url=BASE).status_code == 404
+    assert bob.post(url, data={'page': 1, 'csrf': csrf(bob)}, base_url=BASE).status_code == 404
+    manifest = store.get_job(job)['payload']
+    manifest['commons_filename'] = '공용 이름.pdf'
+    enable_publication(cfg, monkeypatch)
+    assert alice.post(f'/jobs/{job}/publish', data=form, base_url=BASE).status_code == 302
+    assert store.claim_next_job()['id'] == job
+    store.update_job(job, status='done', payload=manifest)
+    assert alice.post(url, data={'page': 1}, base_url=BASE).status_code == 400
+    assert alice.post(url, data={**form, 'page': 2}, base_url=BASE).status_code == 400
+    wiki = Mock(spec=mediawiki.MediaWikiClient)
+    wiki.s = Mock()
+    monkeypatch.setattr(web, 'MediaWikiClient', lambda api, token_provider: wiki if token_provider() == 'access-alice' else None)
+    monkeypatch.setattr(web.page_review, 'extract_page_text', lambda *args: '헌법상 수도의 개념')
+    original = {'header': '머리글', 'footer': '각주', 'body': '현법상 수도의 개념',
+                'level': {'level': 3, 'user': 'Other'}}
+    revision = {'revid': 11, 'slots': {'main': {'contentmodel': 'proofread-page',
+                                                'content': json.dumps(original)}}}
+    wiki.get.return_value = {'query': {'pages': [{'revisions': [revision]}]}}
+    compare = alice.post(url, data=form, base_url=BASE)
+    assert compare.status_code == 200 and '-현법상' in compare.text and '+헌법상' in compare.text
+    wiki.edit_page.assert_not_called()
+    form.update(action='apply', review=re.search(r'name="review" value="([^"]+)"', compare.text)[1])
+    revision['revid'] = 12
+    assert alice.post(url, data=form, base_url=BASE).status_code == 409
+    wiki.edit_page.assert_not_called()
+    compare = alice.post(url, data={**form, 'action': 'compare'}, base_url=BASE)
+    form['review'] = re.search(r'name="review" value="([^"]+)"', compare.text)[1]
+    assert alice.post(url, data=form, base_url=BASE).status_code == 302
+    edit = wiki.edit_page.call_args
+    assert edit.args[0] == '페이지:공용 이름.pdf/1' and edit.kwargs['baserevid'] == 12
+    assert json.loads(edit.args[1]) == {**original, 'body': '헌법상 수도의 개념',
+                                        'level': {'level': 1, 'user': 'alice'}}

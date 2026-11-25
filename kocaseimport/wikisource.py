@@ -75,16 +75,20 @@ class WikisourceBuilder:
         for i, (text, source) in enumerate(texts, start=1):
             title = f"페이지:{filename}/{i}"
             titles.append(title)
-            if self.client.page_exists(title) and not settings.overwrite:
-                logger(f"{i}/{len(texts)}: 기존 페이지 유지")
+            if source == 'existing-page':
                 continue
             serialized = self.serialize_page(text, username)
-            self.client.edit_page(
-                title,
-                serialized,
-                f"초기 전사 자동 생성 ({source}; KoCaseImport) — 교정 안 됨",
-                createonly=not settings.overwrite,
-            )
+            try:
+                self.client.edit_page(
+                    title, serialized,
+                    f"초기 전사 자동 생성 ({source}; KoCaseImport) — 교정 안 됨",
+                    createonly=True,
+                )
+            except MediaWikiError as error:
+                if error.code != 'articleexists':
+                    raise
+                logger(f"{i}/{len(texts)}: 다른 편집자가 만든 페이지 유지")
+                continue
             logger(f"{i}/{len(texts)}: 페이지 생성")
         return titles
 

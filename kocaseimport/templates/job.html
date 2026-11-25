@@ -20,6 +20,15 @@
 <dt>공용 업로드</dt><dd>{{ job.commons_status }}{% if job.commons_url %}<br><a href="{{ job.commons_url }}" target="_blank" rel="noopener noreferrer">공용 파일 보기</a>{% endif %}</dd>
 <dt>위키문헌 업로드</dt><dd>{{ job.wikisource_status }}{% if job.wikisource_url %}<br><a href="{{ job.wikisource_url }}" target="_blank" rel="noopener noreferrer">위키문헌 문서 보기</a>{% endif %}</dd>
 </dl></section>
+{% if job.wikisource_url and not job.refresh and not job.failure and pdf_available and job.page_count %}
+<section><h2>기존 쪽의 교정문 비교</h2>
+<form method="post" action="{{ url_for('review_page', job_id=job.id) }}">
+<input type="hidden" name="csrf" value="{{ identity.csrf }}">
+<label for="page">PDF 쪽 번호 (1–{{ job.page_count }})</label>
+<input id="page" name="page" type="number" min="1" max="{{ job.page_count }}" required>
+<button type="submit">PDF 추출문과 비교</button>
+</form></section>
+{% endif %}
 {% if completed_dry_run %}
 <section>
 <h2>확인한 PDF 게시</h2>

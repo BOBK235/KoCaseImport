@@ -86,7 +86,8 @@ class MediaWikiClient:
         r.raise_for_status()
         result = r.json()
         if "error" in result and not raw:
-            raise MediaWikiError(str(result["error"]))
+            error = result["error"]
+            raise MediaWikiError(str(error), code=error.get("code", "") if isinstance(error, dict) else "")
         return result
 
     def csrf_token(self) -> str:
@@ -107,7 +108,7 @@ class MediaWikiClient:
         return page["revisions"][0]["slots"]["main"].get("content", "")
 
     def edit_page(self, title: str, text: str, summary: str, contentformat: str | None = None,
-                  createonly: bool = True) -> dict[str, Any]:
+                  createonly: bool = True, *, baserevid: int | None = None) -> dict[str, Any]:
         data: dict[str, Any] = {
             "action": "edit",
             "title": title,
@@ -117,7 +118,9 @@ class MediaWikiClient:
         }
         if self.token_provider is None:
             data["bot"] = 1
-        if createonly:
+        if baserevid is not None:
+            data.update(nocreate=1, baserevid=baserevid)
+        elif createonly:
             data["createonly"] = 1
         if contentformat:
             data["contentformat"] = contentformat

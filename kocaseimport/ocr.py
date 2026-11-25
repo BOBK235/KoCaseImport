@@ -1,4 +1,4 @@
-"""Per-page Wikimedia OCR first, then real local PyOCR/Tesseract."""
+"""Per-page Korean PDF text, Wikimedia OCR and local PyOCR/Tesseract."""
 from __future__ import annotations
 
 import json
@@ -10,8 +10,9 @@ from pypdf import PdfReader
 
 from .config import settings
 from .errors import PublicJobError
+from .local_ocr import extract_page_text
 from .mediawiki import MediaWikiClient, MediaWikiError
-from .utils import clean_extracted_text
+from .utils import clean_extracted_text, pdf_wikitext
 
 
 class RemoteOCRFailure(RuntimeError):
@@ -80,8 +81,29 @@ class OCRClient:
         from .local_ocr import recognize_page
         return recognize_page(pdf_path, page_number, settings, guard=guard)
 
+    def _ocr_page(self, pdf_path, number, title, page_count, wikisource, logger):
+        try:
+            image_url = wikisource.image_for_page(title)
+            if not image_url:
+                raise RemoteOCRFailure('image_unavailable')
+            text = self.ocr_wikimedia(image_url)
+            return text, 'wikimedia-ocr'
+        except (RemoteOCRFailure, requests.RequestException, MediaWikiError, ValueError) as error:
+            if isinstance(error, MediaWikiError) and error.authentication_failed:
+                raise PublicJobError(code='auth_expired', page_number=number) from None
+            if isinstance(error, requests.HTTPError) and error.response is not None and error.response.status_code in {401, 403}:
+                raise PublicJobError(code='auth_expired', page_number=number) from None
+            # Never catch AuthError, LeaseLost, DatabaseUnavailable,
+            # MemoryError, or process cancellation as OCR fallback.
+            reason = str(error) if isinstance(error, RemoteOCRFailure) else 'image_lookup'
+            logger(f'{number}/{page_count}: Wikimedia OCR 실패({reason}), PyOCR로 전환')
+            wikisource._authorize()
+            try:
+                return self.ocr_local(pdf_path, number, wikisource._authorize)
+            except PublicJobError as local_error:
+                raise PublicJobError(code=local_error.code, page_number=number) from None
+
     def transcribe_pages(self, pdf_path, filename: str, wikisource: MediaWikiClient, logger=lambda s: None):
-        # Page count only. A text layer must never bypass the primary OCR.
         with open(pdf_path, 'rb') as source:
             page_count = len(PdfReader(source).pages)
         if not 0 < page_count <= settings.max_pdf_pages:
@@ -91,32 +113,28 @@ class OCRClient:
         try:
             for number in range(1, page_count + 1):
                 wikisource._authorize()  # Stop revoked/expired or fenced jobs.
+                title = f'페이지:{filename}/{number}'
+                if wikisource.page_exists(title):
+                    results.append(('', 'existing-page'))
+                    logger(f'{number}/{page_count}: 기존 페이지 유지')
+                    continue
                 try:
-                    image_url = wikisource.image_for_page(f'페이지:{filename}/{number}')
-                    if not image_url:
-                        raise RemoteOCRFailure('image_unavailable')
-                    text = self.ocr_wikimedia(image_url)
-                    origin = 'wikimedia-ocr'
-                except (RemoteOCRFailure, requests.RequestException, MediaWikiError, ValueError) as error:
-                    if isinstance(error, MediaWikiError) and error.authentication_failed:
-                        raise PublicJobError(code='auth_expired', page_number=number) from None
-                    if isinstance(error, requests.HTTPError) and error.response is not None and error.response.status_code in {401, 403}:
-                        raise PublicJobError(code='auth_expired', page_number=number) from None
-                    # Never catch AuthError, LeaseLost, DatabaseUnavailable,
-                    # MemoryError, or process cancellation as OCR fallback.
-                    reason = str(error) if isinstance(error, RemoteOCRFailure) else 'image_lookup'
-                    logger(f'{number}/{page_count}: Wikimedia OCR 실패({reason}), PyOCR로 전환')
-                    wikisource._authorize()
-                    try:
-                        text, origin = self.ocr_local(pdf_path, number, wikisource._authorize)
-                    except PublicJobError as local_error:
-                        raise PublicJobError(code=local_error.code, page_number=number) from None
+                    text = extract_page_text(pdf_path, number, settings, guard=wikisource._authorize)
+                except PublicJobError as error:
+                    raise PublicJobError(code=error.code, page_number=number) from None
+                if text:
+                    text = pdf_wikitext(text)
+                    origin = 'pdf-text'
+                else:
+                    text, origin = self._ocr_page(pdf_path, number, title, page_count, wikisource, logger)
                 wikisource._authorize()
-                total_bytes += len(text.encode('utf-8'))
-                if total_bytes > settings.ocr_total_text_bytes:
+                page_bytes = len(text.encode('utf-8'))
+                total_bytes += page_bytes
+                if page_bytes > settings.ocr_page_text_bytes or total_bytes > settings.ocr_total_text_bytes:
                     raise PublicJobError(code='ocr_result_limit', page_number=number)
                 results.append((text, origin))
-                label = 'Wikimedia OCR' if origin == 'wikimedia-ocr' else 'PyOCR (빈 쪽)' if origin == 'pyocr-blank' else 'PyOCR/Tesseract'
+                label = {'pdf-text': 'PDF 본문', 'wikimedia-ocr': 'Wikimedia OCR',
+                         'pyocr-blank': 'PyOCR (빈 쪽)', 'pyocr-tesseract': 'PyOCR/Tesseract'}[origin]
                 logger(f'{number}/{page_count}: {label} 사용')
             return results
         finally:

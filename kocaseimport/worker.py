@@ -144,7 +144,7 @@ def run_job(job):
             code = ('work_storage_full' if e.errno in {errno.ENOSPC, errno.EDQUOT} else
                     'storage_permission' if e.errno in {errno.EACCES, errno.EPERM} else 'storage_error')
         elif isinstance(e, MediaWikiError):
-            code = 'wiki_error'
+            code = 'auth_expired' if e.authentication_failed else 'wiki_error'
         else:
             current = get_job(job['id']) or {}
             code = 'transcription_failed' if current.get('step') == 'transcription' else 'unexpected'

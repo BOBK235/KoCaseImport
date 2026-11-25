@@ -26,11 +26,10 @@ IMAGE = 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Test.pdf/page
 def transcription(monkeypatch, tmp_path, count=1):
     path = tmp_path/'decision.pdf'
     path.write_bytes(b'%PDF-test-reader')
-    # A usable text layer must no longer bypass Wikimedia OCR.
-    page = Mock()
-    page.extract_text.side_effect = AssertionError('PDF text must not take priority')
-    monkeypatch.setattr(ocr, 'PdfReader', lambda source: SimpleNamespace(pages=[page]*count))
+    monkeypatch.setattr(ocr, 'PdfReader', lambda source: SimpleNamespace(pages=[None]*count))
+    monkeypatch.setattr(ocr, 'extract_page_text', Mock(return_value=''))
     wiki = Mock(spec=MediaWikiClient)
+    wiki.page_exists.return_value = False
     wiki.image_for_page.return_value = IMAGE
     client = ocr.OCRClient()
     client.ocr_wikimedia = Mock(return_value='주문')
@@ -38,7 +37,7 @@ def transcription(monkeypatch, tmp_path, count=1):
     return client, wiki, path
 
 
-def test_remote_first_and_fallback_only_for_failed_page(monkeypatch, tmp_path):
+def test_remote_and_local_only_for_pages_without_usable_text(monkeypatch, tmp_path):
     client, wiki, path = transcription(monkeypatch, tmp_path, 3)
     client.ocr_wikimedia.side_effect = ['주문', ocr.RemoteOCRFailure('timeout'), '끝']
     logs = []
@@ -48,6 +47,24 @@ def test_remote_first_and_fallback_only_for_failed_page(monkeypatch, tmp_path):
     assert [call.args[0] for call in wiki.image_for_page.call_args_list] == [
         '페이지:판례.pdf/1', '페이지:판례.pdf/2', '페이지:판례.pdf/3']
     assert len(logs) == 4
+
+
+def test_mixed_document_keeps_page_numbers_and_existing_corrections(monkeypatch, tmp_path):
+    client, wiki, path = transcription(monkeypatch, tmp_path, 4)
+    wiki.page_exists.side_effect = [True, False, False, False]
+    ocr.extract_page_text.side_effect = ['1. 헌법상 수도의 개념', '', '']
+    client.ocr_wikimedia.side_effect = ['주문', ocr.RemoteOCRFailure('timeout')]
+    texts = client.transcribe_pages(path, '결정문.pdf', wiki)
+    assert texts == [('', 'existing-page'), ('1. 헌법상 수도의 개념', 'pdf-text'),
+                     ('주문', 'wikimedia-ocr'), ('대체 본문', 'pyocr-tesseract')]
+    assert [c.args[0] for c in wiki.image_for_page.call_args_list] == ['페이지:결정문.pdf/3', '페이지:결정문.pdf/4']
+    from kocaseimport.wikisource import WikisourceBuilder
+    from kocaseimport import wikisource
+    monkeypatch.setattr(wikisource, 'settings', replace(Settings(), overwrite=True))
+    wiki.edit_page.side_effect = [MediaWikiError('concurrent creation', code='articleexists'), {}, {}]
+    titles = WikisourceBuilder(wiki).create_pages('결정문.pdf', texts)
+    assert [c.args[0] for c in wiki.edit_page.call_args_list] == titles[1:]
+    assert all(c.kwargs['createonly'] for c in wiki.edit_page.call_args_list)
 
 
 @pytest.mark.parametrize('lookup', ['', requests.Timeout('private URL'), MediaWikiError('private response')])

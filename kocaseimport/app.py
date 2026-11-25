@@ -1,13 +1,17 @@
 from __future__ import annotations
+from difflib import unified_diff
 import hmac
 import json
 import secrets
 from pathlib import Path
+from itsdangerous import BadSignature, URLSafeTimedSerializer
+from requests import RequestException
 from flask import Flask, abort, flash, g, redirect, render_template, request, send_file, session, url_for
 from .config import settings
-from . import auth, audit, history, database
+from . import auth, audit, history, database, page_review
+from .mediawiki import MediaWikiClient, MediaWikiError
 from .store import create_job, get_job, init_db, list_jobs, public_job, queue_publication, quota_status, ResourceLimit, admin_recent_jobs
-from .utils import normalize_case_number, resolve_job_pdf
+from .utils import normalize_case_number, resolve_job_pdf, wiki_page_url
 
 
 def create_app() -> Flask:
@@ -179,6 +183,73 @@ def create_app() -> Flask:
         if not queued:
             return render_job(job, '게시 준비 자료가 없습니다. 새 작업으로 다시 확인해 주세요.', 400)
         return redirect(url_for('job_detail', job_id=job_id))
+
+    @app.post('/jobs/<job_id>/page-review')
+    def review_page(job_id):
+        job = owned_job(job_id)
+        csrf()
+        manifest = job['payload']
+        if job['status'] != 'done' or not job['live'] or not manifest.get('commons_filename'):
+            abort(404)
+        number = request.form.get('page', type=int)
+        if not number or not 1 <= number <= min(manifest.get('page_count', 0), settings.max_pdf_pages):
+            abort(400)
+        action = request.form.get('action', 'compare')
+        if action not in ('compare', 'apply'):
+            abort(400)
+        if action == 'apply' and not settings.live_edits:
+            abort(403)
+        title = f"페이지:{manifest['commons_filename']}/{number}"
+        signer = URLSafeTimedSerializer(settings.secret_key, salt='page-review')
+        owner = g.identity['owner_id']
+        expected = None
+        if action == 'apply':
+            try:
+                expected = signer.loads(request.form.get('review', ''), max_age=1800)
+            except BadSignature:
+                return render_job(job, '비교 화면이 만료되었거나 유효하지 않습니다. 다시 비교해 주세요.', 409)
+        wiki = MediaWikiClient(settings.wikisource_api,
+                               token_provider=lambda: auth.access_token(g.identity['auth_id'], owner))
+        try:
+            revid, content = page_review.read_revision(wiki, title, settings)
+            new = page_review.proposed_body(downloaded_pdf(job), manifest, number, settings)
+            stamp = page_review.review_stamp(job_id, owner, number, revid, new)
+            old = content['body']
+            if action == 'apply':
+                if expected != stamp:
+                    return render_job(job, '비교한 뒤 문서나 추출문이 바뀌었습니다. 최신 판과 다시 비교해 주세요.', 409)
+                if old != new:
+                    audit.record(settings, 'page_edit_requested', actor_id=owner,
+                                 actor_name=g.identity['username'], job=job)
+                    content['body'] = new
+                    content['level'] = {'level': 1, 'user': g.identity['username']}
+                    wiki.edit_page(title, json.dumps(content, ensure_ascii=False),
+                                   '공식 PDF 추출문 대조 후 본문 교체 (KoCaseImport)',
+                                   contentformat='application/json', createonly=False, baserevid=revid)
+                    flash(f'{number}쪽에 PDF 추출문을 반영했습니다.')
+                else:
+                    flash(f'{number}쪽의 본문이 이미 추출문과 같습니다.')
+                return redirect(url_for('job_detail', job_id=job_id))
+            before, after = old.splitlines(), new.splitlines()
+            diff = None
+            if max(len(before), len(after)) <= 1000:
+                diff = '\n'.join(unified_diff(before, after, '기존 본문', 'PDF 추출문', lineterm=''))
+            return render_template('page_review.html', identity=g.identity, title=title, number=number,
+                                   page_url=wiki_page_url(settings.wikisource_api, title), job_id=job_id,
+                                   old=old, new=new, diff=diff, revid=revid, review=signer.dumps(stamp),
+                                   live_enabled=settings.live_edits)
+        except page_review.ReviewError as error:
+            return render_job(job, str(error), error.status)
+        except auth.AuthError:
+            return render_job(job, '로그인이 만료되었습니다. 다시 로그인해 주세요.', 401)
+        except MediaWikiError as error:
+            if error.code in {'editconflict', 'pagedeleted', 'missingtitle', 'articleexists'}:
+                return render_job(job, '위키문헌 문서가 바뀌었습니다. 다시 비교해 주세요.', 409)
+            return render_job(job, '위키문헌에서 요청을 처리하지 못했습니다. 로그인과 편집 권한을 확인해 주세요.', 502)
+        except RequestException:
+            return render_job(job, '위키문헌 연결이 끊겼습니다. 현재 판을 다시 확인해 주세요.', 502)
+        finally:
+            wiki.s.close()
 
     @app.get('/jobs/<job_id>/pdf')
     def job_pdf(job_id):

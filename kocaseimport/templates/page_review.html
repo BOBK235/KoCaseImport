@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block title %}{{ number }}쪽 본문 비교 · KoCaseImport{% endblock %}
+{% block content %}
+<h1>{{ number }}쪽 본문 비교</h1>
+<p><a href="{{ page_url }}" target="_blank" rel="noopener noreferrer">{{ title }}</a> · 비교 기준 판 {{ revid }}</p>
+{% if old == new %}
+<p>현재 위키문헌 본문과 PDF 추출문이 같습니다.</p>
+{% else %}
+{% if diff %}<h2>바뀌는 줄</h2><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ diff }}</pre>{% endif %}
+<details{% if not diff %} open{% endif %}><summary>현재 위키문헌 본문</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ old }}</pre></details>
+<details{% if not diff %} open{% endif %}><summary>공식 PDF 추출문</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ new }}</pre></details>
+{% if live_enabled %}
+<form method="post" action="{{ url_for('review_page', job_id=job_id) }}">
+<input type="hidden" name="csrf" value="{{ identity.csrf }}">
+<input type="hidden" name="page" value="{{ number }}"><input type="hidden" name="review" value="{{ review }}">
+<p>반영하면 이 쪽의 본문 전체를 PDF 추출문으로 교체하고 교정 상태를 ‘교정 안 됨’으로 설정합니다. 머리글과 바닥글은 보존합니다.</p>
+<button name="action" value="apply" type="submit">내 계정으로 {{ number }}쪽에 반영</button>
+</form>
+{% endif %}{% endif %}
+<p><a href="{{ url_for('job_detail', job_id=job_id) }}">작업 결과로 돌아가기</a></p>
+{% endblock %}
